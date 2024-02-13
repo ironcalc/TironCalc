@@ -276,8 +276,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Char('s') => {
-                            if selected_sheet < sheet_names.len() {
-                                selected_sheet += 1;
+                            selected_sheet += 1;
+                            if selected_sheet >= sheet_names.len() {
+                                selected_sheet = 0;
                             }
                         }
                         KeyCode::Char('a') => {
