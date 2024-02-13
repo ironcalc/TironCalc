@@ -1,4 +1,8 @@
 # TironCalc
+[![Discord chat][discord-badge]][discord-url]
+
+[discord-badge]: https://img.shields.io/discord/500028886025895936.svg?logo=discord&style=flat-square
+[discord-url]: https://discord.gg/zZYWfh3RHJ
 
 TironCalc, or Tiron for friends,  is a TUI (Terminal User Interface) for IronCalc. Based on [ratatui](https://github.com/ratatui-org/ratatui)
 
