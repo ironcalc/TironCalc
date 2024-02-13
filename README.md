@@ -34,7 +34,7 @@ $ tiron example.xlsx
 * "s" to go to the next sheet
 * "PgUp/PgDown" to navigate rows faster
 
-There is no way to save to file for now :)
+There is no way to save to file for now.
 
 ## Inspiration
 
