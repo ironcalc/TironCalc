@@ -41,6 +41,6 @@ There is no way to save to file for now.
 
 ## Inspiration
 
-James Gosling of Java fame created [sc](<https://en.wikipedia.org/wiki/Sc_(spreadsheet_calculator)>) the spreadsheet calculator.
+James Gosling of Java fame created [sc](https://en.wikipedia.org/wiki/Sc_(spreadsheet_calculator)) the spreadsheet calculator.
 
 Andrés Martinelli has been maintaining [sc-im](https://github.com/andmarti1424/sc-im), the spreadsheet calculator improvised.
