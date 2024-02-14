@@ -115,9 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rows.push(Row::new(vec![Cell::from(sheet_name.clone()).style(style)]));
             });
             let widths = &[Constraint::Length(100)];
-            let sheet_list = Table::new(rows, widths)
-                .block(sheets)
-                .column_spacing(0);
+            let sheet_list = Table::new(rows, widths).block(sheets).column_spacing(0);
 
             rect.render_widget(sheet_list, global_chunks[0]);
 
