@@ -1,24 +1,25 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, Event as CEvent, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ironcalc::{
     base::{expressions::utils::number_to_column, model::Model},
+    export::save_to_xlsx,
     import::load_model_from_xlsx,
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
     Terminal,
 };
-use std::io;
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+use std::{io, sync::mpsc};
+use tui_input::{backend::crossterm::EventHandler, Input};
 
 use std::env;
 
@@ -31,16 +32,19 @@ enum Event<I> {
 enum CursorMode {
     Navigate,
     Input,
+    Popup,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode().expect("cannot run in raw mode");
+    enable_raw_mode()?;
+
     let args: Vec<String> = env::args().collect();
+    let mut file_name = "model.xlsx";
     let mut model = if args.len() > 1 {
-        let file_name = &args[1];
+        file_name = &args[1];
         load_model_from_xlsx(file_name, "en", "UTC").unwrap()
     } else {
-        Model::new_empty("model.xlsx", "en", "UTC").unwrap()
+        Model::new_empty(file_name, "en", "UTC").unwrap()
     };
     let mut selected_sheet = 0;
     let mut selected_row_index = 1;
@@ -51,6 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let column_width: u16 = 11;
     let mut cursor_mode = CursorMode::Navigate;
     let mut input_str = String::new();
+
+    let mut input: Input = file_name.into();
+
+    let mut popup_open = false;
 
     let (tx, rx) = mpsc::channel();
     let tick_rate = Duration::from_millis(200);
@@ -73,7 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let stdout = io::stdout();
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -229,13 +239,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let formula_bar = Paragraph::new(vec![Line::from(vec![Span::raw(formula_bar_text)])]);
             rect.render_widget(formula_bar.block(Block::default()), spreadsheet_chunks[0]);
             rect.render_widget(spreadsheet, spreadsheet_chunks[1]);
+
+            if popup_open {
+                let block = Block::default().title("Save as").borders(Borders::ALL);
+                let area = centered_rect(60, 20, size);
+                rect.render_widget(Clear, area); //this clears out the background
+                rect.render_widget(block, area);
+
+                let text_area = centered_rect(20, 20, area);
+                let input_text = input.value();
+                let input_widget = Paragraph::new(vec![Line::from(vec![Span::raw(input_text)])]);
+                rect.render_widget(input_widget.block(Block::default()), text_area);
+            }
         })?;
 
         match cursor_mode {
-            CursorMode::Navigate => {
+            CursorMode::Popup => {
                 match rx.recv()? {
                     Event::Input(event) => match event.code {
-                        KeyCode::Char('q') => {
+                        KeyCode::Enter => {
                             terminal.clear()?;
                             // restore terminal
                             disable_raw_mode()?;
@@ -245,7 +267,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 DisableMouseCapture
                             )?;
                             terminal.show_cursor()?;
+                            let _ = save_to_xlsx(&model, input.value());
                             break;
+                        }
+                        KeyCode::Esc => {
+                            popup_open = false;
+                            cursor_mode = CursorMode::Navigate;
+                        }
+                        _ => {
+                            input.handle_event(&CEvent::Key(event));
+                        }
+                    },
+                    Event::Tick => {}
+                }
+            }
+            CursorMode::Navigate => {
+                match rx.recv()? {
+                    Event::Input(event) => match event.code {
+                        KeyCode::Char('q') => {
+                            popup_open = true;
+                            cursor_mode = CursorMode::Popup;
                         }
                         KeyCode::Down => {
                             selected_row_index += 1;
@@ -330,4 +371,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// helper function to create a centered rect using up certain percentage of the available rect `r`
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }

@@ -295,6 +295,7 @@ checksum = "1e186cfbae8084e513daff4240b4797e342f988cecda4fb6c939150f96315fd8"
 [[package]]
 name = "ironcalc"
 version = "0.1.0"
+source = "git+https://github.com/ironcalc/IronCalc#bf85bd29725985733c292c7705248016f568d65f"
 dependencies = [
  "chrono",
  "ironcalc_base",
@@ -309,6 +310,7 @@ dependencies = [
 [[package]]
 name = "ironcalc_base"
 version = "0.1.0"
+source = "git+https://github.com/ironcalc/IronCalc#bf85bd29725985733c292c7705248016f568d65f"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -831,6 +833,17 @@ dependencies = [
  "crossterm",
  "ironcalc",
  "ratatui",
+ "tui-input",
+]
+
+[[package]]
+name = "tui-input"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3e785f863a3af4c800a2a669d0b64c879b538738e352607e2624d03f868dc01"
+dependencies = [
+ "crossterm",
+ "unicode-width",
 ]
 
 [[package]]
