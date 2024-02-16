@@ -11,9 +11,9 @@ use ironcalc::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
     Terminal,
 };
 use std::thread;
@@ -241,15 +241,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rect.render_widget(spreadsheet, spreadsheet_chunks[1]);
 
             if popup_open {
-                let block = Block::default().title("Save as").borders(Borders::ALL);
                 let area = centered_rect(60, 20, size);
-                rect.render_widget(Clear, area); //this clears out the background
-                rect.render_widget(block, area);
-
-                let text_area = centered_rect(20, 20, area);
                 let input_text = input.value();
-                let input_widget = Paragraph::new(vec![Line::from(vec![Span::raw(input_text)])]);
-                rect.render_widget(input_widget.block(Block::default()), text_area);
+                let text = vec![
+                    Line::from(vec![input_text.fg(Color::Yellow)]),
+                    "".into(),
+                    Line::from(vec![
+                        "ESC".green(),
+                        " to abort. ".into(),
+                        "END".green(),
+                        " to quit without saving. ".into(),
+                        "Enter".green(),
+                        " to save and quit".into(),
+                    ]),
+                ];
+                rect.render_widget(
+                    Paragraph::new(text).block(Block::bordered().title("Save as")),
+                    area,
+                );
+                rect.set_cursor(
+                    // Put cursor past the end of the input text
+                    area.x + (input.visual_cursor() as u16) + 1,
+                    // Move one line own, from the border to the input line
+                    area.y + 1,
+                )
             }
         })?;
 
@@ -257,6 +272,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CursorMode::Popup => {
                 match rx.recv()? {
                     Event::Input(event) => match event.code {
+                        KeyCode::End => {
+                            terminal.clear()?;
+                            // restore terminal
+                            disable_raw_mode()?;
+                            execute!(
+                                terminal.backend_mut(),
+                                LeaveAlternateScreen,
+                                DisableMouseCapture
+                            )?;
+                            terminal.show_cursor()?;
+                            break;
+                        }
                         KeyCode::Enter => {
                             terminal.clear()?;
                             // restore terminal

@@ -32,12 +32,11 @@ $ tiron example.xlsx
 ```
 
 -   `e` to edit a cell and enter the value or formula.
--   `q` to quit
+-   `q` to quit and save
 -   `+` to add a sheet
 -   `s` to go to the next sheet
 -   `PgUp/PgDown` to navigate rows faster
 
-There is no way to save to file for now.
 
 ## Inspiration
 
