@@ -13,12 +13,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
     Terminal,
 };
-use std::thread;
 use std::time::{Duration, Instant};
 use std::{io, sync::mpsc};
+use std::{str::FromStr, thread};
 use tui_input::{backend::crossterm::EventHandler, Input};
 
 use std::env;
@@ -54,9 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sheet_list_width = 20;
     let column_width: u16 = 11;
     let mut cursor_mode = CursorMode::Navigate;
-    let mut input_str = String::new();
+    let mut input_formula = Input::default();
 
-    let mut input: Input = file_name.into();
+    let mut input_file_name: Input = file_name.into();
 
     let mut popup_open = false;
 
@@ -91,8 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let header_style = Style::default().fg(Color::Yellow).bg(Color::White);
     let selected_header_style = Style::default().bg(Color::Yellow).fg(Color::White);
 
-    let cell_style = Style::default().fg(Color::White).bg(Color::Black);
-    let selected_cell_style = Style::default().fg(Color::Yellow).bg(Color::White);
+    let selected_cell_style = Style::default().fg(Color::Yellow).bg(Color::LightCyan);
 
     let background_style = Style::default().bg(Color::Black);
     let selected_sheet_style = Style::default().bg(Color::White).fg(Color::LightMagenta);
@@ -189,12 +188,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let value = model
                         .formatted_cell_value(selected_sheet as u32, row_index as i32, column_index)
                         .unwrap();
+                    let cell_style = model.get_style_for_cell(
+                        selected_sheet as u32,
+                        row_index as i32,
+                        column_index,
+                    );
                     let style = if selected_row_index == row_index
                         && selected_column_index == column_index
                     {
                         selected_cell_style
                     } else {
-                        cell_style
+                        let bg_color = match cell_style.fill.fg_color {
+                            Some(s) => Color::from_str(&s).unwrap(),
+                            None => Color::White,
+                        };
+                        let fg_color = match cell_style.font.color {
+                            Some(s) => Color::from_str(&s).unwrap(),
+                            None => Color::Black,
+                        };
+                        Style::default().fg(fg_color).bg(bg_color)
                     };
                     row.push(Cell::from(value.to_string()).style(style));
                 }
@@ -209,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .block(Block::default().style(Style::default().bg(Color::Black)))
                 .column_spacing(0);
 
-            let text = if cursor_mode == CursorMode::Navigate {
+            let text = if cursor_mode != CursorMode::Input {
                 model
                     .cell_formula(
                         selected_sheet as u32,
@@ -227,22 +239,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap()
                     })
             } else {
-                format!("{}|", input_str)
+                input_formula.value().to_string()
             };
-
-            let formula_bar_text = format!(
-                "{}{}: {}",
+            let cell_address_text = format!(
+                "{}{}: ",
                 number_to_column(selected_column_index).unwrap(),
                 selected_row_index,
-                text
             );
+            let formula_bar_text = format!("{}{}", cell_address_text, text,);
             let formula_bar = Paragraph::new(vec![Line::from(vec![Span::raw(formula_bar_text)])]);
             rect.render_widget(formula_bar.block(Block::default()), spreadsheet_chunks[0]);
             rect.render_widget(spreadsheet, spreadsheet_chunks[1]);
+            if cursor_mode == CursorMode::Input {
+                let area = spreadsheet_chunks[0];
+                rect.set_cursor(
+                    area.x
+                        + (input_formula.visual_cursor() as u16)
+                        + cell_address_text.len() as u16,
+                    area.y,
+                )
+            }
 
             if popup_open {
                 let area = centered_rect(60, 20, size);
-                let input_text = input.value();
+                rect.render_widget(Clear, area);
+                let input_text = input_file_name.value();
                 let text = vec![
                     Line::from(vec![input_text.fg(Color::Yellow)]),
                     "".into(),
@@ -261,7 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 rect.set_cursor(
                     // Put cursor past the end of the input text
-                    area.x + (input.visual_cursor() as u16) + 1,
+                    area.x + (input_file_name.visual_cursor() as u16) + 1,
                     // Move one line own, from the border to the input line
                     area.y + 1,
                 )
@@ -294,7 +315,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 DisableMouseCapture
                             )?;
                             terminal.show_cursor()?;
-                            let _ = save_to_xlsx(&model, input.value());
+                            let _ = save_to_xlsx(&model, input_file_name.value());
                             break;
                         }
                         KeyCode::Esc => {
@@ -302,7 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             cursor_mode = CursorMode::Navigate;
                         }
                         _ => {
-                            input.handle_event(&CEvent::Key(event));
+                            input_file_name.handle_event(&CEvent::Key(event));
                         }
                     },
                     Event::Tick => {}
@@ -352,14 +373,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('e') => {
                             cursor_mode = CursorMode::Input;
-                            input_str = model
+                            let input_str = model
                                 .cell_formula(
                                     selected_sheet as u32,
                                     selected_row_index as i32,
                                     selected_column_index,
                                 )
                                 .unwrap()
-                                .unwrap_or_default()
+                                .unwrap_or_default();
+                            input_formula = input_formula.with_value(input_str);
                         }
                         KeyCode::Char('+') => {
                             model.new_sheet();
@@ -375,22 +397,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CursorMode::Input => match rx.recv()? {
                 Event::Input(event) => match event.code {
-                    KeyCode::Char(c) => {
-                        input_str.push(c);
-                    }
-                    KeyCode::Backspace => {
-                        input_str.pop();
-                    }
+                    // KeyCode::Char(c) => {
+                    //     input_str.push(c);
+                    // }
+                    // KeyCode::Backspace => {
+                    //     input_str.pop();
+                    // }
                     KeyCode::Enter => {
                         cursor_mode = CursorMode::Navigate;
-                        let value = input_str.clone();
+                        let value = input_formula.value().to_string();
                         let sheet = selected_sheet as i32;
                         let row = selected_row_index as i32;
                         let column = selected_column_index;
                         model.set_user_input(sheet as u32, row, column, value);
                         model.evaluate();
                     }
-                    _ => {}
+                    _ => {
+                        input_formula.handle_event(&CEvent::Key(event));
+                    }
                 },
                 Event::Tick => {}
             },
