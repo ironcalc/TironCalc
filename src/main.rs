@@ -4,9 +4,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ironcalc::{
-    base::{expressions::utils::number_to_column, model::Model},
+    base::{expressions::utils::number_to_column, Model},
     export::save_to_xlsx,
-    import::load_model_from_xlsx,
+    import::load_from_xlsx,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut file_name = "model.xlsx";
     let mut model = if args.len() > 1 {
         file_name = &args[1];
-        load_model_from_xlsx(file_name, "en", "UTC").unwrap()
+        load_from_xlsx(file_name, "en", "UTC").unwrap()
     } else {
         Model::new_empty(file_name, "en", "UTC").unwrap()
     };
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sheet_names = model.workbook.get_worksheet_names();
     loop {
         terminal.draw(|rect| {
-            let size = rect.size();
+            let size = rect.area();
 
             let global_chunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -136,8 +136,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .split(global_chunks[1]);
 
             let spreadsheet_width = size.width - sheet_list_width;
-            let spreadsheet_heigh = size.height - 1;
-            let row_count = spreadsheet_heigh - 1;
+            let spreadsheet_height = size.height - 1;
+            let row_count = spreadsheet_height - 1;
 
             let first_row_width: u16 = 3;
             let column_count =
@@ -186,13 +186,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 row.push(Cell::from(format!("{}", row_index)).style(style));
                 for column_index in minimum_column_index..=maximum_column_index {
                     let value = model
-                        .formatted_cell_value(selected_sheet as u32, row_index as i32, column_index)
+                        .get_formatted_cell_value(
+                            selected_sheet as u32,
+                            row_index as i32,
+                            column_index,
+                        )
                         .unwrap();
-                    let cell_style = model.get_style_for_cell(
-                        selected_sheet as u32,
-                        row_index as i32,
-                        column_index,
-                    );
+                    let cell_style = model
+                        .get_style_for_cell(selected_sheet as u32, row_index as i32, column_index)
+                        .unwrap();
                     let style = if selected_row_index == row_index
                         && selected_column_index == column_index
                     {
@@ -223,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let text = if cursor_mode != CursorMode::Input {
                 model
-                    .cell_formula(
+                    .get_cell_formula(
                         selected_sheet as u32,
                         selected_row_index as i32,
                         selected_column_index,
@@ -231,7 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap()
                     .unwrap_or_else(|| {
                         model
-                            .formatted_cell_value(
+                            .get_formatted_cell_value(
                                 selected_sheet as u32,
                                 selected_row_index as i32,
                                 selected_column_index,
@@ -252,12 +254,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rect.render_widget(spreadsheet, spreadsheet_chunks[1]);
             if cursor_mode == CursorMode::Input {
                 let area = spreadsheet_chunks[0];
-                rect.set_cursor(
+                rect.set_cursor_position((
                     area.x
                         + (input_formula.visual_cursor() as u16)
                         + cell_address_text.len() as u16,
                     area.y,
-                )
+                ))
             }
 
             if popup_open {
@@ -280,12 +282,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Paragraph::new(text).block(Block::bordered().title("Save as")),
                     area,
                 );
-                rect.set_cursor(
+                rect.set_cursor_position((
                     // Put cursor past the end of the input text
                     area.x + (input_file_name.visual_cursor() as u16) + 1,
                     // Move one line own, from the border to the input line
                     area.y + 1,
-                )
+                ))
             }
         })?;
 
@@ -374,7 +376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('e') => {
                             cursor_mode = CursorMode::Input;
                             let input_str = model
-                                .cell_formula(
+                                .get_cell_formula(
                                     selected_sheet as u32,
                                     selected_row_index as i32,
                                     selected_column_index,
@@ -409,7 +411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let sheet = selected_sheet as i32;
                         let row = selected_row_index as i32;
                         let column = selected_column_index;
-                        model.set_user_input(sheet as u32, row, column, value);
+                        model
+                            .set_user_input(sheet as u32, row, column, value)
+                            .unwrap();
                         model.evaluate();
                     }
                     _ => {
