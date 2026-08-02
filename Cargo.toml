@@ -1,12 +1,28 @@
 [package]
-name = "tiron"
+name = "tironcalc"
 version = "0.8.3"
+authors = ["Nicolás Hatcher <nicolas@theuniverse.today>"]
 edition = "2021"
+homepage = "https://www.ironcalc.com"
+repository = "https://github.com/ironcalc/TironCalc"
+description = "TironCalc: a TUI (Terminal User Interface) for the IronCalc spreadsheet engine"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["spreadsheet", "tui", "terminal", "xlsx", "excel"]
+categories = ["command-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 crossterm = "0.28.0"
-ironcalc = { git = "https://github.com/ironcalc/IronCalc", version = "0.8.3"}
+# Uses the git repository when built locally; the version from crates.io
+# is used when the crate is published.
+# https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#multiple-locations
+ironcalc = { git = "https://github.com/ironcalc/IronCalc", version = "0.8.3" }
 ratatui = "0.29.0"
 tui-input = "0.11.0"
+
+# The binary keeps the short name: `cargo install tironcalc` installs `tiron`.
+[[bin]]
+name = "tiron"
+path = "src/main.rs"
