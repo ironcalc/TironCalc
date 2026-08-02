@@ -42,9 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut file_name = "model.xlsx";
     let mut model = if args.len() > 1 {
         file_name = &args[1];
-        load_from_xlsx(file_name, "en", "UTC").unwrap()
+        load_from_xlsx(file_name, "en", "UTC", "en").unwrap()
     } else {
-        Model::new_empty(file_name, "en", "UTC").unwrap()
+        Model::new_empty(file_name, "en", "UTC", "en").unwrap()
     };
     let mut selected_sheet = 0;
     let mut selected_row_index = 1;
@@ -200,13 +200,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         selected_cell_style
                     } else {
-                        let bg_color = match cell_style.fill.fg_color {
-                            Some(s) => Color::from_str(&s).unwrap(),
-                            None => Color::White,
+                        let theme = &model.workbook.theme;
+                        let bg_rgb = cell_style.fill.color.to_rgb(theme);
+                        let bg_color = if bg_rgb.is_empty() {
+                            Color::White
+                        } else {
+                            Color::from_str(&bg_rgb).unwrap_or(Color::White)
                         };
-                        let fg_color = match cell_style.font.color {
-                            Some(s) => Color::from_str(&s).unwrap(),
-                            None => Color::Black,
+                        let fg_rgb = cell_style.font.color.to_rgb(theme);
+                        let fg_color = if fg_rgb.is_empty() {
+                            Color::Black
+                        } else {
+                            Color::from_str(&fg_rgb).unwrap_or(Color::Black)
                         };
                         Style::default().fg(fg_color).bg(bg_color)
                     };

@@ -1,0 +1,34 @@
+name: Publish crate
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v7
+
+      - name: Update Rust
+        run: rustup update stable
+
+      # docs.rs needs no step of its own: it builds the documentation
+      # automatically for every version published to crates.io.
+      - name: Publish tironcalc
+        run: |
+          LOCAL="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tironcalc").version')"
+          REMOTE="$(curl -s -A tironcalc-ci https://crates.io/api/v1/crates/tironcalc | jq -r '.crate.max_version')"
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "tironcalc $LOCAL is already on crates.io, skipping"
+          else
+            cargo publish --token "$CARGO_REGISTRY_TOKEN"
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
