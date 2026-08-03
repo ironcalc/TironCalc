@@ -1,11 +1,14 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ironcalc::{
     base::{
-        expressions::utils::number_to_column, types::Color as IcColor, Model, COLUMN_WIDTH_FACTOR,
+        expressions::types::Area, expressions::utils::number_to_column, UserModel,
+        COLUMN_WIDTH_FACTOR,
     },
     export::save_to_xlsx,
     import::load_from_xlsx,
@@ -39,10 +42,11 @@ enum CursorMode {
     Help,
 }
 
-const HELP: [(&str, &str); 14] = [
+const HELP: [(&str, &str); 15] = [
     ("↑↓←→", "navigate cells"),
     ("PgUp/PgDn", "jump 10 rows"),
     ("e", "edit the current cell"),
+    ("u / r", "undo/redo"),
     ("b", "background color"),
     ("c", "text color"),
     ("B / I / U", "bold/italic/underline"),
@@ -88,11 +92,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = env::args().collect();
     let mut file_name = "model.xlsx";
+    // UserModel wraps the engine model and keeps an undo/redo history.
     let mut model = if args.len() > 1 {
         file_name = &args[1];
-        load_from_xlsx(file_name, "en", "UTC", "en").unwrap()
+        UserModel::from_model(load_from_xlsx(file_name, "en", "UTC", "en").unwrap())
     } else {
-        Model::new_empty(file_name, "en", "UTC", "en").unwrap()
+        UserModel::new_empty(file_name, "en", "UTC", "en").unwrap()
     };
     let mut selected_sheet = 0;
     let mut selected_row_index = 1;
@@ -152,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let background_style = Style::default().bg(Color::Black);
     let selected_sheet_style = Style::default().bg(Color::White).fg(Color::LightMagenta);
     let non_selected_sheet_style = Style::default().fg(Color::White);
-    let mut sheet_names = model.workbook.get_worksheet_names();
+    let mut sheet_names = model.get_model().workbook.get_worksheet_names();
     loop {
         terminal.draw(|rect| {
             let size = rect.area();
@@ -362,14 +367,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .unwrap();
                     let cell_style = model
-                        .get_style_for_cell(selected_sheet as u32, row_index as i32, column_index)
+                        .get_cell_style(selected_sheet as u32, row_index as i32, column_index)
                         .unwrap();
                     let mut style = if selected_row_index == row_index
                         && selected_column_index == column_index
                     {
                         selected_cell_style
                     } else {
-                        let theme = &model.workbook.theme;
+                        let theme = &model.get_model().workbook.theme;
                         let bg_rgb = cell_style.fill.color.to_rgb(theme);
                         let bg_color = if bg_rgb.is_empty() {
                             Color::White
@@ -411,21 +416,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let text = if cursor_mode != CursorMode::Input {
                 model
-                    .get_cell_formula(
+                    .get_cell_content(
                         selected_sheet as u32,
                         selected_row_index as i32,
                         selected_column_index,
                     )
-                    .unwrap()
-                    .unwrap_or_else(|| {
-                        model
-                            .get_formatted_cell_value(
-                                selected_sheet as u32,
-                                selected_row_index as i32,
-                                selected_column_index,
-                            )
-                            .unwrap()
-                    })
+                    .unwrap_or_default()
             } else {
                 input_formula.value().to_string()
             };
@@ -456,9 +452,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Line::from(vec![input_text.fg(Color::Yellow)]),
                     "".into(),
                     Line::from(vec![
-                        "ESC".green(),
+                        "Esc".green(),
                         " to abort. ".into(),
-                        "END".green(),
+                        "Ctrl+Q".green(),
                         " to quit without saving. ".into(),
                         "Enter".green(),
                         " to save and quit".into(),
@@ -560,6 +556,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CursorMode::Popup => {
                 match rx.recv()? {
                     Event::Input(event) => match event.code {
+                        // Ctrl+Q quits without saving (End kept as a fallback)
+                        KeyCode::Char('q') | KeyCode::Char('Q')
+                            if event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            terminal.clear()?;
+                            // restore terminal
+                            disable_raw_mode()?;
+                            execute!(
+                                terminal.backend_mut(),
+                                LeaveAlternateScreen,
+                                DisableMouseCapture
+                            )?;
+                            terminal.show_cursor()?;
+                            break;
+                        }
                         KeyCode::End => {
                             terminal.clear()?;
                             // restore terminal
@@ -582,7 +593,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 DisableMouseCapture
                             )?;
                             terminal.show_cursor()?;
-                            let _ = save_to_xlsx(&model, input_file_name.value());
+                            let _ = save_to_xlsx(model.get_model(), input_file_name.value());
                             break;
                         }
                         KeyCode::Esc => {
@@ -641,26 +652,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('e') => {
                             cursor_mode = CursorMode::Input;
                             let input_str = model
-                                .get_cell_formula(
+                                .get_cell_content(
                                     selected_sheet as u32,
                                     selected_row_index as i32,
                                     selected_column_index,
                                 )
-                                .unwrap()
                                 .unwrap_or_default();
                             input_formula = input_formula.with_value(input_str);
                         }
                         KeyCode::Char('+') => {
-                            model.new_sheet();
-                            model.evaluate();
-                            sheet_names = model.workbook.get_worksheet_names();
+                            let _ = model.new_sheet();
+                            sheet_names = model.get_model().workbook.get_worksheet_names();
+                        }
+                        KeyCode::Char('u') => {
+                            let _ = model.undo();
+                        }
+                        KeyCode::Char('r') => {
+                            let _ = model.redo();
                         }
                         KeyCode::Char('>') | KeyCode::Char('.') => {
                             let sheet = selected_sheet as u32;
                             let column = selected_column_index;
                             if let Ok(width) = model.get_column_width(sheet, column) {
-                                let _ = model.set_column_width(
+                                let _ = model.set_columns_width(
                                     sheet,
+                                    column,
                                     column,
                                     width + COLUMN_WIDTH_FACTOR,
                                 );
@@ -671,14 +687,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let column = selected_column_index;
                             if let Ok(width) = model.get_column_width(sheet, column) {
                                 let width = (width - COLUMN_WIDTH_FACTOR).max(COLUMN_WIDTH_FACTOR);
-                                let _ = model.set_column_width(sheet, column, width);
+                                let _ = model.set_columns_width(sheet, column, column, width);
                             }
                         }
                         KeyCode::Char('=') => {
                             let sheet = selected_sheet as u32;
                             let row = selected_row_index as i32;
                             if let Ok(height) = model.get_row_height(sheet, row) {
-                                let _ = model.set_row_height(sheet, row, height + ROW_PX_PER_LINE);
+                                let _ = model.set_rows_height(
+                                    sheet,
+                                    row,
+                                    row,
+                                    height + ROW_PX_PER_LINE,
+                                );
                             }
                         }
                         KeyCode::Char('-') => {
@@ -686,21 +707,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let row = selected_row_index as i32;
                             if let Ok(height) = model.get_row_height(sheet, row) {
                                 let height = (height - ROW_PX_PER_LINE).max(ROW_PX_PER_LINE);
-                                let _ = model.set_row_height(sheet, row, height);
+                                let _ = model.set_rows_height(sheet, row, row, height);
                             }
                         }
                         KeyCode::Char(c @ ('B' | 'I' | 'U' | 'S')) => {
                             let sheet = selected_sheet as u32;
                             let row = selected_row_index as i32;
                             let column = selected_column_index;
-                            if let Ok(mut style) = model.get_style_for_cell(sheet, row, column) {
-                                match c {
-                                    'B' => style.font.b = !style.font.b,
-                                    'I' => style.font.i = !style.font.i,
-                                    'U' => style.font.u = !style.font.u,
-                                    _ => style.font.strike = !style.font.strike,
-                                }
-                                let _ = model.set_cell_style(sheet, row, column, &style);
+                            if let Ok(style) = model.get_cell_style(sheet, row, column) {
+                                let (path, on) = match c {
+                                    'B' => ("font.b", style.font.b),
+                                    'I' => ("font.i", style.font.i),
+                                    'U' => ("font.u", style.font.u),
+                                    _ => ("font.strike", style.font.strike),
+                                };
+                                let range = Area {
+                                    sheet,
+                                    row,
+                                    column,
+                                    width: 1,
+                                    height: 1,
+                                };
+                                let value = if on { "false" } else { "true" };
+                                let _ = model.update_range_style(&range, path, value);
                             }
                         }
                         KeyCode::Char('?') => {
@@ -714,11 +743,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let columns = model.get_frozen_columns_count(sheet).unwrap_or(0);
                             // Freezing at the same spot (or at A1) unfreezes.
                             if new_rows == rows && new_columns == columns {
-                                let _ = model.set_frozen_rows(sheet, 0);
-                                let _ = model.set_frozen_columns(sheet, 0);
+                                let _ = model.set_frozen_rows_count(sheet, 0);
+                                let _ = model.set_frozen_columns_count(sheet, 0);
                             } else {
-                                let _ = model.set_frozen_rows(sheet, new_rows);
-                                let _ = model.set_frozen_columns(sheet, new_columns);
+                                let _ = model.set_frozen_rows_count(sheet, new_rows);
+                                let _ = model.set_frozen_columns_count(sheet, new_columns);
                             }
                         }
                         KeyCode::Char('b') => {
@@ -758,20 +787,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     KeyCode::Enter => {
                         let (_, hex) = PALETTE[color_picker_index];
-                        let color = match hex {
-                            Some(hex) => IcColor::Rgb(hex.to_string()),
-                            None => IcColor::None,
+                        let range = Area {
+                            sheet: selected_sheet as u32,
+                            row: selected_row_index as i32,
+                            column: selected_column_index,
+                            width: 1,
+                            height: 1,
                         };
-                        let sheet = selected_sheet as u32;
-                        let row = selected_row_index as i32;
-                        let column = selected_column_index;
-                        if let Ok(mut style) = model.get_style_for_cell(sheet, row, column) {
-                            match color_target {
-                                ColorTarget::Background => style.fill.color = color,
-                                ColorTarget::Text => style.font.color = color,
-                            }
-                            let _ = model.set_cell_style(sheet, row, column, &style);
-                        }
+                        let path = match color_target {
+                            ColorTarget::Background => "fill.color",
+                            ColorTarget::Text => "font.color",
+                        };
+                        // An empty value clears the color back to the default.
+                        let _ = model.update_range_style(&range, path, hex.unwrap_or(""));
                         cursor_mode = CursorMode::Navigate;
                     }
                     _ => {}
@@ -788,14 +816,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // }
                     KeyCode::Enter => {
                         cursor_mode = CursorMode::Navigate;
-                        let value = input_formula.value().to_string();
-                        let sheet = selected_sheet as i32;
+                        let sheet = selected_sheet as u32;
                         let row = selected_row_index as i32;
                         let column = selected_column_index;
-                        model
-                            .set_user_input(sheet as u32, row, column, value)
-                            .unwrap();
-                        model.evaluate();
+                        let _ = model.set_user_input(sheet, row, column, input_formula.value());
                     }
                     _ => {
                         input_formula.handle_event(&CEvent::Key(event));

@@ -32,6 +32,7 @@ $ tiron example.xlsx
 ```
 -   `Arrow Keys` to navigate cells
 -   `e` to edit a cell and enter the value or formula.
+-   `u`/`r` to undo/redo
 -   `q` to quit and save
 -   `+` to add a sheet
 -   `s` to go to the next sheet
