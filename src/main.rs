@@ -36,7 +36,25 @@ enum CursorMode {
     Input,
     Popup,
     ColorPicker,
+    Help,
 }
+
+const HELP: [(&str, &str); 14] = [
+    ("↑↓←→", "navigate cells"),
+    ("PgUp/PgDn", "jump 10 rows"),
+    ("e", "edit the current cell"),
+    ("b", "background color"),
+    ("c", "text color"),
+    ("B / I / U", "bold/italic/underline"),
+    ("S", "strikethrough"),
+    ("< / >", "narrower/wider column"),
+    ("- / =", "shorter/taller row"),
+    ("f", "freeze/unfreeze panes"),
+    ("s / a", "next/previous sheet"),
+    ("+", "add a sheet"),
+    ("?", "this help"),
+    ("q", "quit (asks to save)"),
+];
 
 #[derive(PartialEq)]
 enum ColorTarget {
@@ -120,6 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.clear()?;
 
     let header_style = Style::default().fg(Color::Black).bg(Color::Gray);
+    let frozen_header_style = Style::default().fg(Color::White).bg(Color::DarkGray);
     let selected_header_style = Style::default()
         .fg(Color::Black)
         .bg(Color::Cyan)
@@ -138,10 +157,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|rect| {
             let size = rect.area();
 
+            // Everything above a one-line status bar at the bottom
+            let outer_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
+                .split(size);
+
             let global_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(sheet_list_width), Constraint::Min(3)].as_ref())
-                .split(size);
+                .split(outer_chunks[0]);
 
             // Sheet list to the left
             let sheets = Block::default()
@@ -173,8 +198,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .split(global_chunks[1]);
 
             let spreadsheet_width = size.width - sheet_list_width;
-            let spreadsheet_height = size.height - 1;
-            let row_count = spreadsheet_height - 1;
+            // The formula bar and the status bar take one line each
+            let spreadsheet_height = size.height.saturating_sub(2);
+            let row_count = spreadsheet_height.saturating_sub(1);
+
+            let status_bar = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " ?",
+                    Style::default()
+                        .fg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" for help"),
+            ]))
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+            rect.render_widget(status_bar, outer_chunks[1]);
 
             let first_row_width: u16 = 3;
             let available_width = spreadsheet_width.saturating_sub(first_row_width);
@@ -196,38 +234,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The first cell in that row is the top left square of the spreadsheet
             row.push(Cell::from(""));
 
-            // We want to make sure the selected cell is fully visible.
-            if selected_column_index < minimum_column_index {
-                minimum_column_index = selected_column_index;
-            }
-            while minimum_column_index < selected_column_index {
-                let width: u16 = (minimum_column_index..=selected_column_index)
-                    .map(column_char_width)
-                    .sum();
-                if width <= available_width {
-                    break;
+            // Frozen rows and columns are always visible at the top/left of
+            // the grid; only the region after them scrolls.
+            let frozen_rows = model
+                .get_frozen_rows_count(selected_sheet as u32)
+                .unwrap_or(0)
+                .max(0) as u16;
+            let frozen_columns = model
+                .get_frozen_columns_count(selected_sheet as u32)
+                .unwrap_or(0)
+                .max(0);
+            let frozen_width: u16 = (1..=frozen_columns).map(column_char_width).sum();
+            let frozen_height: u16 = (1..=frozen_rows).map(row_line_height).sum();
+            let scroll_width = available_width.saturating_sub(frozen_width);
+            let scroll_height = row_count.saturating_sub(frozen_height);
+
+            // The scrolled region starts after the frozen panes.
+            minimum_column_index = minimum_column_index.max(frozen_columns + 1);
+            minimum_row_index = minimum_row_index.max(frozen_rows + 1);
+
+            // We want to make sure the selected cell is fully visible. A
+            // selected cell inside the frozen panes is always visible.
+            if selected_column_index > frozen_columns {
+                if selected_column_index < minimum_column_index {
+                    minimum_column_index = selected_column_index;
                 }
-                minimum_column_index += 1;
-            }
-            if selected_row_index < minimum_row_index {
-                minimum_row_index = selected_row_index;
-            }
-            while minimum_row_index < selected_row_index {
-                let height: u16 = (minimum_row_index..=selected_row_index)
-                    .map(row_line_height)
-                    .sum();
-                if height <= row_count {
-                    break;
+                while minimum_column_index < selected_column_index {
+                    let width: u16 = (minimum_column_index..=selected_column_index)
+                        .map(column_char_width)
+                        .sum();
+                    if width <= scroll_width {
+                        break;
+                    }
+                    minimum_column_index += 1;
                 }
-                minimum_row_index += 1;
+            }
+            if selected_row_index > frozen_rows {
+                if selected_row_index < minimum_row_index {
+                    minimum_row_index = selected_row_index;
+                }
+                while minimum_row_index < selected_row_index {
+                    let height: u16 = (minimum_row_index..=selected_row_index)
+                        .map(row_line_height)
+                        .sum();
+                    if height <= scroll_height {
+                        break;
+                    }
+                    minimum_row_index += 1;
+                }
             }
 
-            // Visible columns and rows with their sizes in terminal cells. The
-            // last column is capped to the remaining space: the widths must add
-            // up to exactly the available width or the Table widget will
-            // flex-shrink every column.
+            // Visible columns and rows with their sizes in terminal cells:
+            // first the frozen ones, then the scrolled region. The last column
+            // is capped to the remaining space: the widths must add up to
+            // exactly the available width or the Table widget will flex-shrink
+            // every column.
             let mut visible_columns: Vec<(i32, u16)> = Vec::new();
             let mut used_width = 0;
+            let mut column_index = 1;
+            while used_width < available_width && column_index <= frozen_columns {
+                let width = column_char_width(column_index).min(available_width - used_width);
+                visible_columns.push((column_index, width));
+                used_width += width;
+                column_index += 1;
+            }
             let mut column_index = minimum_column_index;
             while used_width < available_width {
                 let width = column_char_width(column_index).min(available_width - used_width);
@@ -237,6 +307,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let mut visible_rows: Vec<(u16, u16)> = Vec::new();
             let mut used_height = 0;
+            let mut row_index = 1;
+            while used_height < row_count && row_index <= frozen_rows {
+                let height = row_line_height(row_index);
+                visible_rows.push((row_index, height));
+                used_height += height;
+                row_index += 1;
+            }
             let mut row_index = minimum_row_index;
             while used_height < row_count {
                 let height = row_line_height(row_index);
@@ -249,6 +326,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let column_str = number_to_column(*column_index);
                 let style = if *column_index == selected_column_index {
                     selected_header_style
+                } else if *column_index <= frozen_columns {
+                    frozen_header_style
                 } else {
                     header_style
                 };
@@ -267,6 +346,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut row = Vec::new();
                 let style = if row_index == selected_row_index {
                     selected_header_style
+                } else if row_index <= frozen_rows {
+                    frozen_header_style
                 } else {
                     header_style
                 };
@@ -283,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let cell_style = model
                         .get_style_for_cell(selected_sheet as u32, row_index as i32, column_index)
                         .unwrap();
-                    let style = if selected_row_index == row_index
+                    let mut style = if selected_row_index == row_index
                         && selected_column_index == column_index
                     {
                         selected_cell_style
@@ -303,6 +384,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         Style::default().fg(fg_color).bg(bg_color)
                     };
+                    if cell_style.font.b {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if cell_style.font.i {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    if cell_style.font.u {
+                        style = style.add_modifier(Modifier::UNDERLINED);
+                    }
+                    if cell_style.font.strike {
+                        style = style.add_modifier(Modifier::CROSSED_OUT);
+                    }
                     row.push(Cell::from(value.to_string()).style(style));
                 }
                 rows.push(Row::new(row).height(*row_height));
@@ -381,6 +474,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Move one line own, from the border to the input line
                     area.y + 1,
                 ))
+            }
+
+            if cursor_mode == CursorMode::Help {
+                let width = 40.min(size.width);
+                let height = (HELP.len() as u16 + 3).min(size.height);
+                let area = Rect {
+                    x: size.width.saturating_sub(width) / 2,
+                    y: size.height.saturating_sub(height) / 2,
+                    width,
+                    height,
+                };
+                rect.render_widget(Clear, area);
+                let mut lines = Vec::new();
+                for (key, description) in HELP {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(" {:>9}", key),
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("  "),
+                        Span::raw(description),
+                    ]));
+                }
+                lines.push(Line::from(vec![Span::styled(
+                    " press any key to close",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                rect.render_widget(
+                    Paragraph::new(lines).block(Block::bordered().title("Keys")),
+                    area,
+                );
             }
 
             if cursor_mode == CursorMode::ColorPicker {
@@ -563,6 +689,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = model.set_row_height(sheet, row, height);
                             }
                         }
+                        KeyCode::Char(c @ ('B' | 'I' | 'U' | 'S')) => {
+                            let sheet = selected_sheet as u32;
+                            let row = selected_row_index as i32;
+                            let column = selected_column_index;
+                            if let Ok(mut style) = model.get_style_for_cell(sheet, row, column) {
+                                match c {
+                                    'B' => style.font.b = !style.font.b,
+                                    'I' => style.font.i = !style.font.i,
+                                    'U' => style.font.u = !style.font.u,
+                                    _ => style.font.strike = !style.font.strike,
+                                }
+                                let _ = model.set_cell_style(sheet, row, column, &style);
+                            }
+                        }
+                        KeyCode::Char('?') => {
+                            cursor_mode = CursorMode::Help;
+                        }
+                        KeyCode::Char('f') => {
+                            let sheet = selected_sheet as u32;
+                            let new_rows = (selected_row_index - 1) as i32;
+                            let new_columns = selected_column_index - 1;
+                            let rows = model.get_frozen_rows_count(sheet).unwrap_or(0);
+                            let columns = model.get_frozen_columns_count(sheet).unwrap_or(0);
+                            // Freezing at the same spot (or at A1) unfreezes.
+                            if new_rows == rows && new_columns == columns {
+                                let _ = model.set_frozen_rows(sheet, 0);
+                                let _ = model.set_frozen_columns(sheet, 0);
+                            } else {
+                                let _ = model.set_frozen_rows(sheet, new_rows);
+                                let _ = model.set_frozen_columns(sheet, new_columns);
+                            }
+                        }
                         KeyCode::Char('b') => {
                             color_target = ColorTarget::Background;
                             color_picker_index = 0;
@@ -580,6 +738,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Event::Tick => {}
                 }
             }
+            CursorMode::Help => match rx.recv()? {
+                Event::Input(_) => {
+                    cursor_mode = CursorMode::Navigate;
+                }
+                Event::Tick => {}
+            },
             CursorMode::ColorPicker => match rx.recv()? {
                 Event::Input(event) => match event.code {
                     KeyCode::Esc => {

@@ -38,8 +38,12 @@ $ tiron example.xlsx
 -   `a` to go to the previous sheet
 -   `b` to pick a background color for the current cell
 -   `c` to pick a text color for the current cell
+-   `B`/`I`/`U`/`S` to toggle bold/italic/underline/strikethrough
 -   `<`/`>` (or `,`/`.`) to make the current column narrower/wider
 -   `-`/`=` to make the current row shorter/taller
+-   `f` to freeze the rows above and the columns to the left of the current
+    cell; press it again on the same cell (or on A1) to unfreeze
+-   `?` to show the keyboard shortcuts
 -   `PgUp/PgDown` to navigate rows faster
 
 
