@@ -4,14 +4,14 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ironcalc::{
-    base::{expressions::utils::number_to_column, Model},
+    base::{expressions::utils::number_to_column, types::Color as IcColor, Model},
     export::save_to_xlsx,
     import::load_from_xlsx,
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
     Terminal,
@@ -33,7 +33,30 @@ enum CursorMode {
     Navigate,
     Input,
     Popup,
+    ColorPicker,
 }
+
+#[derive(PartialEq)]
+enum ColorTarget {
+    Background,
+    Text,
+}
+
+// (name, hex). `None` clears the color back to the default.
+const PALETTE: [(&str, Option<&str>); 12] = [
+    ("Default", None),
+    ("Black", Some("#000000")),
+    ("White", Some("#FFFFFF")),
+    ("Gray", Some("#B7B7B7")),
+    ("Red", Some("#E06666")),
+    ("Orange", Some("#F6B26B")),
+    ("Yellow", Some("#FFD966")),
+    ("Green", Some("#93C47D")),
+    ("Teal", Some("#76A5AF")),
+    ("Blue", Some("#6FA8DC")),
+    ("Purple", Some("#8E7CC3")),
+    ("Pink", Some("#C27BA0")),
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
@@ -59,6 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_file_name: Input = file_name.into();
 
     let mut popup_open = false;
+    let mut color_target = ColorTarget::Background;
+    let mut color_picker_index = 0;
 
     let (tx, rx) = mpsc::channel();
     let tick_rate = Duration::from_millis(200);
@@ -88,10 +113,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let header_style = Style::default().fg(Color::Yellow).bg(Color::White);
-    let selected_header_style = Style::default().bg(Color::Yellow).fg(Color::White);
+    let header_style = Style::default().fg(Color::Black).bg(Color::Gray);
+    let selected_header_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
 
-    let selected_cell_style = Style::default().fg(Color::Yellow).bg(Color::LightCyan);
+    let selected_cell_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
 
     let background_style = Style::default().bg(Color::Black);
     let selected_sheet_style = Style::default().bg(Color::White).fg(Color::LightMagenta);
@@ -294,6 +325,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     area.y + 1,
                 ))
             }
+
+            if cursor_mode == CursorMode::ColorPicker {
+                let title = match color_target {
+                    ColorTarget::Background => "Background color",
+                    ColorTarget::Text => "Text color",
+                };
+                let width = 24.min(size.width);
+                let height = (PALETTE.len() as u16 + 3).min(size.height);
+                let area = Rect {
+                    x: size.width.saturating_sub(width) / 2,
+                    y: size.height.saturating_sub(height) / 2,
+                    width,
+                    height,
+                };
+                rect.render_widget(Clear, area);
+                let mut lines = Vec::new();
+                for (index, (name, hex)) in PALETTE.iter().enumerate() {
+                    let swatch = match hex {
+                        Some(hex) => Span::styled(
+                            "██ ",
+                            Style::default().fg(Color::from_str(hex).unwrap_or(Color::White)),
+                        ),
+                        None => Span::raw("·· "),
+                    };
+                    let (marker, name_style) = if index == color_picker_index {
+                        ("› ", Style::default().add_modifier(Modifier::BOLD))
+                    } else {
+                        ("  ", Style::default())
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw(marker),
+                        swatch,
+                        Span::styled(*name, name_style),
+                    ]));
+                }
+                lines.push(Line::from(vec![
+                    " Enter".green(),
+                    " set ".into(),
+                    "Esc".green(),
+                    " cancel".into(),
+                ]));
+                rect.render_widget(
+                    Paragraph::new(lines).block(Block::bordered().title(title)),
+                    area,
+                );
+            }
         })?;
 
         match cursor_mode {
@@ -395,6 +472,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             model.evaluate();
                             sheet_names = model.workbook.get_worksheet_names();
                         }
+                        KeyCode::Char('b') => {
+                            color_target = ColorTarget::Background;
+                            color_picker_index = 0;
+                            cursor_mode = CursorMode::ColorPicker;
+                        }
+                        KeyCode::Char('c') => {
+                            color_target = ColorTarget::Text;
+                            color_picker_index = 0;
+                            cursor_mode = CursorMode::ColorPicker;
+                        }
                         _ => {
                             // println!("{:?}", event);
                         }
@@ -402,6 +489,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Event::Tick => {}
                 }
             }
+            CursorMode::ColorPicker => match rx.recv()? {
+                Event::Input(event) => match event.code {
+                    KeyCode::Esc => {
+                        cursor_mode = CursorMode::Navigate;
+                    }
+                    KeyCode::Up => {
+                        color_picker_index =
+                            (color_picker_index + PALETTE.len() - 1) % PALETTE.len();
+                    }
+                    KeyCode::Down => {
+                        color_picker_index = (color_picker_index + 1) % PALETTE.len();
+                    }
+                    KeyCode::Enter => {
+                        let (_, hex) = PALETTE[color_picker_index];
+                        let color = match hex {
+                            Some(hex) => IcColor::Rgb(hex.to_string()),
+                            None => IcColor::None,
+                        };
+                        let sheet = selected_sheet as u32;
+                        let row = selected_row_index as i32;
+                        let column = selected_column_index;
+                        if let Ok(mut style) = model.get_style_for_cell(sheet, row, column) {
+                            match color_target {
+                                ColorTarget::Background => style.fill.color = color,
+                                ColorTarget::Text => style.font.color = color,
+                            }
+                            let _ = model.set_cell_style(sheet, row, column, &style);
+                        }
+                        cursor_mode = CursorMode::Navigate;
+                    }
+                    _ => {}
+                },
+                Event::Tick => {}
+            },
             CursorMode::Input => match rx.recv()? {
                 Event::Input(event) => match event.code {
                     // KeyCode::Char(c) => {

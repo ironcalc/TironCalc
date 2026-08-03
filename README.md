@@ -36,6 +36,8 @@ $ tiron example.xlsx
 -   `+` to add a sheet
 -   `s` to go to the next sheet
 -   `a` to go to the previous sheet
+-   `b` to pick a background color for the current cell
+-   `c` to pick a text color for the current cell
 -   `PgUp/PgDown` to navigate rows faster
 
 
