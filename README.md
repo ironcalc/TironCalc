@@ -32,10 +32,19 @@ $ tiron example.xlsx
 ```
 -   `Arrow Keys` to navigate cells
 -   `e` to edit a cell and enter the value or formula.
+-   `u`/`r` to undo/redo
 -   `q` to quit and save
 -   `+` to add a sheet
 -   `s` to go to the next sheet
 -   `a` to go to the previous sheet
+-   `b` to pick a background color for the current cell
+-   `c` to pick a text color for the current cell
+-   `B`/`I`/`U`/`S` to toggle bold/italic/underline/strikethrough
+-   `<`/`>` (or `,`/`.`) to make the current column narrower/wider
+-   `-`/`=` to make the current row shorter/taller
+-   `f` to freeze the rows above and the columns to the left of the current
+    cell; press it again on the same cell (or on A1) to unfreeze
+-   `?` to show the keyboard shortcuts
 -   `PgUp/PgDown` to navigate rows faster
 
 
