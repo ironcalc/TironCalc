@@ -38,6 +38,8 @@ $ tiron example.xlsx
 -   `a` to go to the previous sheet
 -   `b` to pick a background color for the current cell
 -   `c` to pick a text color for the current cell
+-   `<`/`>` (or `,`/`.`) to make the current column narrower/wider
+-   `-`/`=` to make the current row shorter/taller
 -   `PgUp/PgDown` to navigate rows faster
 
 

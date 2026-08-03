@@ -4,7 +4,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ironcalc::{
-    base::{expressions::utils::number_to_column, types::Color as IcColor, Model},
+    base::{
+        expressions::utils::number_to_column, types::Color as IcColor, Model, COLUMN_WIDTH_FACTOR,
+    },
     export::save_to_xlsx,
     import::load_from_xlsx,
 };
@@ -42,6 +44,11 @@ enum ColorTarget {
     Text,
 }
 
+// IronCalc column widths and row heights are in pixels: one terminal cell is
+// COLUMN_WIDTH_FACTOR pixels wide and one terminal line is ROW_PX_PER_LINE
+// pixels (the default row height) tall.
+const ROW_PX_PER_LINE: f64 = 25.0;
+
 // (name, hex). `None` clears the color back to the default.
 const PALETTE: [(&str, Option<&str>); 12] = [
     ("Default", None),
@@ -75,7 +82,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut minimum_row_index = 1;
     let mut minimum_column_index = 1;
     let sheet_list_width = 20;
-    let column_width: u16 = 11;
     let mut cursor_mode = CursorMode::Navigate;
     let mut input_formula = Input::default();
 
@@ -171,43 +177,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let row_count = spreadsheet_height - 1;
 
             let first_row_width: u16 = 3;
-            let column_count =
-                f64::ceil(((spreadsheet_width - first_row_width) as f64) / (column_width as f64))
-                    as i32;
+            let available_width = spreadsheet_width.saturating_sub(first_row_width);
+            let column_char_width = |column: i32| -> u16 {
+                let width_px = model
+                    .get_column_width(selected_sheet as u32, column)
+                    .unwrap_or(10.0 * COLUMN_WIDTH_FACTOR);
+                (width_px / COLUMN_WIDTH_FACTOR).round().max(1.0) as u16
+            };
+            let row_line_height = |row: u16| -> u16 {
+                let height_px = model
+                    .get_row_height(selected_sheet as u32, row as i32)
+                    .unwrap_or(ROW_PX_PER_LINE);
+                (height_px / ROW_PX_PER_LINE).round().max(1.0) as u16
+            };
             let mut rows = vec![];
             // The first row in the column headers
             let mut row = Vec::new();
             // The first cell in that row is the top left square of the spreadsheet
             row.push(Cell::from(""));
-            let mut maximum_column_index = minimum_column_index + column_count - 1;
-            let mut maximum_row_index = minimum_row_index + row_count - 1;
 
-            // We want to make sure the selected cell is visible.
-            if selected_column_index > maximum_column_index {
-                maximum_column_index = selected_column_index;
-                minimum_column_index = maximum_column_index - column_count + 1;
-            } else if selected_column_index < minimum_column_index {
+            // We want to make sure the selected cell is fully visible.
+            if selected_column_index < minimum_column_index {
                 minimum_column_index = selected_column_index;
-                maximum_column_index = minimum_column_index + column_count - 1;
             }
-            if selected_row_index >= maximum_row_index {
-                maximum_row_index = selected_row_index;
-                minimum_row_index = maximum_row_index - row_count + 1;
-            } else if selected_row_index < minimum_row_index {
+            while minimum_column_index < selected_column_index {
+                let width: u16 = (minimum_column_index..=selected_column_index)
+                    .map(column_char_width)
+                    .sum();
+                if width <= available_width {
+                    break;
+                }
+                minimum_column_index += 1;
+            }
+            if selected_row_index < minimum_row_index {
                 minimum_row_index = selected_row_index;
-                maximum_row_index = minimum_row_index + row_count - 1;
             }
-            for column_index in minimum_column_index..=maximum_column_index {
-                let column_str = number_to_column(column_index);
-                let style = if column_index == selected_column_index {
+            while minimum_row_index < selected_row_index {
+                let height: u16 = (minimum_row_index..=selected_row_index)
+                    .map(row_line_height)
+                    .sum();
+                if height <= row_count {
+                    break;
+                }
+                minimum_row_index += 1;
+            }
+
+            // Visible columns and rows with their sizes in terminal cells. The
+            // last column is capped to the remaining space: the widths must add
+            // up to exactly the available width or the Table widget will
+            // flex-shrink every column.
+            let mut visible_columns: Vec<(i32, u16)> = Vec::new();
+            let mut used_width = 0;
+            let mut column_index = minimum_column_index;
+            while used_width < available_width {
+                let width = column_char_width(column_index).min(available_width - used_width);
+                visible_columns.push((column_index, width));
+                used_width += width;
+                column_index += 1;
+            }
+            let mut visible_rows: Vec<(u16, u16)> = Vec::new();
+            let mut used_height = 0;
+            let mut row_index = minimum_row_index;
+            while used_height < row_count {
+                let height = row_line_height(row_index);
+                visible_rows.push((row_index, height));
+                used_height += height;
+                row_index += 1;
+            }
+
+            for (column_index, width) in &visible_columns {
+                let column_str = number_to_column(*column_index);
+                let style = if *column_index == selected_column_index {
                     selected_header_style
                 } else {
                     header_style
                 };
-                row.push(Cell::from(format!("     {}", column_str.unwrap())).style(style));
+                row.push(
+                    Cell::from(format!(
+                        "{:^width$}",
+                        column_str.unwrap(),
+                        width = *width as usize
+                    ))
+                    .style(style),
+                );
             }
             rows.push(Row::new(row));
-            for row_index in minimum_row_index..=maximum_row_index {
+            for (row_index, row_height) in &visible_rows {
+                let row_index = *row_index;
                 let mut row = Vec::new();
                 let style = if row_index == selected_row_index {
                     selected_header_style
@@ -215,7 +271,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     header_style
                 };
                 row.push(Cell::from(format!("{}", row_index)).style(style));
-                for column_index in minimum_column_index..=maximum_column_index {
+                for (column_index, _) in &visible_columns {
+                    let column_index = *column_index;
                     let value = model
                         .get_formatted_cell_value(
                             selected_sheet as u32,
@@ -248,12 +305,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     row.push(Cell::from(value.to_string()).style(style));
                 }
-                rows.push(Row::new(row));
+                rows.push(Row::new(row).height(*row_height));
             }
             let mut widths = Vec::new();
             widths.push(Constraint::Length(first_row_width));
-            for _ in 0..column_count {
-                widths.push(Constraint::Length(column_width));
+            for (_, width) in &visible_columns {
+                widths.push(Constraint::Length(*width));
             }
             let spreadsheet = Table::new(rows, widths)
                 .block(Block::default().style(Style::default().bg(Color::Black)))
@@ -471,6 +528,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             model.new_sheet();
                             model.evaluate();
                             sheet_names = model.workbook.get_worksheet_names();
+                        }
+                        KeyCode::Char('>') | KeyCode::Char('.') => {
+                            let sheet = selected_sheet as u32;
+                            let column = selected_column_index;
+                            if let Ok(width) = model.get_column_width(sheet, column) {
+                                let _ = model.set_column_width(
+                                    sheet,
+                                    column,
+                                    width + COLUMN_WIDTH_FACTOR,
+                                );
+                            }
+                        }
+                        KeyCode::Char('<') | KeyCode::Char(',') => {
+                            let sheet = selected_sheet as u32;
+                            let column = selected_column_index;
+                            if let Ok(width) = model.get_column_width(sheet, column) {
+                                let width = (width - COLUMN_WIDTH_FACTOR).max(COLUMN_WIDTH_FACTOR);
+                                let _ = model.set_column_width(sheet, column, width);
+                            }
+                        }
+                        KeyCode::Char('=') => {
+                            let sheet = selected_sheet as u32;
+                            let row = selected_row_index as i32;
+                            if let Ok(height) = model.get_row_height(sheet, row) {
+                                let _ = model.set_row_height(sheet, row, height + ROW_PX_PER_LINE);
+                            }
+                        }
+                        KeyCode::Char('-') => {
+                            let sheet = selected_sheet as u32;
+                            let row = selected_row_index as i32;
+                            if let Ok(height) = model.get_row_height(sheet, row) {
+                                let height = (height - ROW_PX_PER_LINE).max(ROW_PX_PER_LINE);
+                                let _ = model.set_row_height(sheet, row, height);
+                            }
                         }
                         KeyCode::Char('b') => {
                             color_target = ColorTarget::Background;
