@@ -1,6 +1,7 @@
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyModifiers,
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -125,7 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if event::poll(timeout).expect("poll works") {
                 if let CEvent::Key(key) = event::read().expect("can read events") {
-                    tx.send(Event::Input(key)).expect("can send events");
+                    if key.kind != KeyEventKind::Release {
+                        tx.send(Event::Input(key)).expect("can send events");
+                    }
                 }
             }
 
