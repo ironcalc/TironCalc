@@ -72,6 +72,10 @@ enum ColorTarget {
 // pixels (the default row height) tall.
 const ROW_PX_PER_LINE: f64 = 25.0;
 
+// Sheet size limits (IronCalc keeps its own copies crate-private)
+const LAST_ROW: i32 = 1_048_576;
+const LAST_COLUMN: i32 = 16_384;
+
 // (name, hex). `None` clears the color back to the default.
 const PALETTE: [(&str, Option<&str>); 12] = [
     ("Default", None),
@@ -103,6 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut selected_sheet = 0;
     let mut selected_row_index = 1;
     let mut selected_column_index = 1;
+    // Whole row/column selection; both together select every cell.
+    let mut whole_row = false;
+    let mut whole_column = false;
     let mut minimum_row_index = 1;
     let mut minimum_column_index = 1;
     let sheet_list_width = 20;
@@ -164,6 +171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fg(Color::Black)
         .bg(ironcalc_orange)
         .add_modifier(Modifier::BOLD);
+    // Light tint of the orange for the rest of a selected row/column
+    let selection_bg = Color::Rgb(0xFC, 0xE0, 0xC8);
 
     let background_style = Style::default().bg(Color::Black);
     let selected_sheet_style = Style::default().bg(Color::White).fg(Color::LightMagenta);
@@ -346,7 +355,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             for (column_index, width) in &visible_columns {
                 let column_str = number_to_column(*column_index);
-                let style = if *column_index == selected_column_index {
+                let in_selection = whole_row || *column_index == selected_column_index;
+                // Orange when the whole column is selected
+                let style = if in_selection && whole_column {
+                    selected_cell_style
+                } else if in_selection {
                     selected_header_style
                 } else if *column_index <= frozen_columns {
                     frozen_header_style
@@ -369,7 +382,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (row_index, row_height) in &visible_rows {
                 let row_index = *row_index;
                 let mut row = Vec::new();
-                let style = if row_index == selected_row_index {
+                let in_selection = whole_column || row_index == selected_row_index;
+                // Orange when the whole row is selected
+                let style = if in_selection && whole_row {
+                    selected_cell_style
+                } else if in_selection {
                     selected_header_style
                 } else if row_index <= frozen_rows {
                     frozen_header_style
@@ -389,14 +406,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let cell_style = model
                         .get_cell_style(selected_sheet as u32, row_index as i32, column_index)
                         .unwrap();
+                    // With a whole row/column selected the header carries
+                    // the orange, so the active cell just gets the tint.
                     let mut style = if selected_row_index == row_index
                         && selected_column_index == column_index
+                        && !whole_row
+                        && !whole_column
                     {
                         selected_cell_style
                     } else {
                         let theme = &model.get_model().workbook.theme;
                         let bg_rgb = cell_style.fill.color.to_rgb(theme);
-                        let bg_color = if bg_rgb.is_empty() {
+                        let in_selection = (whole_column || selected_row_index == row_index)
+                            && (whole_row || selected_column_index == column_index);
+                        let bg_color = if in_selection {
+                            selection_bg
+                        } else if bg_rgb.is_empty() {
                             Color::White
                         } else {
                             Color::from_str(&bg_rgb).unwrap_or(Color::White)
@@ -653,20 +678,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             popup_open = true;
                             cursor_mode = CursorMode::Popup;
                         }
+                        // Going up past row 1 selects the whole column and
+                        // going left past column A the whole row; with both,
+                        // every cell is selected. Down/Right step back out.
                         KeyCode::Down => {
-                            selected_row_index += 1;
+                            if whole_column {
+                                whole_column = false;
+                                selected_row_index = 1;
+                            } else {
+                                selected_row_index += 1;
+                            }
                         }
                         KeyCode::Up => {
-                            if selected_row_index > 1 {
+                            if selected_row_index > 1 && !whole_column {
                                 selected_row_index -= 1;
+                            } else {
+                                whole_column = true;
                             }
                         }
                         KeyCode::Right => {
-                            selected_column_index += 1;
+                            if whole_row {
+                                whole_row = false;
+                                selected_column_index = 1;
+                            } else {
+                                selected_column_index += 1;
+                            }
                         }
                         KeyCode::Left => {
-                            if selected_column_index > 1 {
+                            if selected_column_index > 1 && !whole_row {
                                 selected_column_index -= 1;
+                            } else {
+                                whole_row = true;
                             }
                         }
                         KeyCode::PageDown => {
@@ -760,13 +802,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     'U' => ("font.u", style.font.u),
                                     _ => ("font.strike", style.font.strike),
                                 };
-                                let range = Area {
-                                    sheet,
-                                    row,
-                                    column,
-                                    width: 1,
-                                    height: 1,
-                                };
+                                let range =
+                                    selection_area(sheet, row, column, whole_row, whole_column);
                                 let value = if on { "false" } else { "true" };
                                 let _ = model.update_range_style(&range, path, value);
                             }
@@ -826,13 +863,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     KeyCode::Enter => {
                         let (_, hex) = PALETTE[color_picker_index];
-                        let range = Area {
-                            sheet: selected_sheet as u32,
-                            row: selected_row_index as i32,
-                            column: selected_column_index,
-                            width: 1,
-                            height: 1,
-                        };
+                        let range = selection_area(
+                            selected_sheet as u32,
+                            selected_row_index as i32,
+                            selected_column_index,
+                            whole_row,
+                            whole_column,
+                        );
                         let path = match color_target {
                             ColorTarget::Background => "fill.color",
                             ColorTarget::Text => "font.color",
@@ -870,6 +907,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// The selected range: the active cell, or its whole row/column, or every cell
+fn selection_area(sheet: u32, row: i32, column: i32, whole_row: bool, whole_column: bool) -> Area {
+    let (column, width) = if whole_row {
+        (1, LAST_COLUMN)
+    } else {
+        (column, 1)
+    };
+    let (row, height) = if whole_column {
+        (1, LAST_ROW)
+    } else {
+        (row, 1)
+    };
+    Area {
+        sheet,
+        row,
+        column,
+        width,
+        height,
+    }
 }
 
 /// helper function to create a centered rect using up certain percentage of the available rect `r`
