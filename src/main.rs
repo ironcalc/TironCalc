@@ -8,8 +8,10 @@ use crossterm::{
 };
 use ironcalc::{
     base::{
-        expressions::types::Area, expressions::utils::number_to_column, UserModel,
-        COLUMN_WIDTH_FACTOR,
+        expressions::types::Area,
+        expressions::utils::number_to_column,
+        types::{HorizontalAlignment, MergedCell},
+        UserModel, COLUMN_WIDTH_FACTOR,
     },
     export::save_to_xlsx,
     import::load_from_xlsx,
@@ -45,8 +47,9 @@ enum CursorMode {
     Help,
 }
 
-const HELP: [(&str, &str); 15] = [
+const HELP: [(&str, &str); 17] = [
     ("↑↓←→", "navigate cells"),
+    ("Shift+↑↓←→", "extend the selection"),
     ("PgUp/PgDn", "jump 10 rows"),
     ("e", "edit the current cell"),
     ("u / r", "undo/redo"),
@@ -56,6 +59,7 @@ const HELP: [(&str, &str); 15] = [
     ("S", "strikethrough"),
     ("< / >", "narrower/wider column"),
     ("- / =", "shorter/taller row"),
+    ("m / M", "merge (& center)/unmerge"),
     ("f", "freeze/unfreeze panes"),
     ("s / a", "next/previous sheet"),
     ("+", "add a sheet"),
@@ -152,6 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut popup_open = false;
     let mut color_target = ColorTarget::Background;
     let mut color_picker_index = 0;
+    // Shown in the status bar until the next key press (e.g. why a merge failed)
+    let mut status_message: Option<String> = None;
 
     let (tx, rx) = mpsc::channel();
     let tick_rate = Duration::from_millis(200);
@@ -210,6 +216,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let non_selected_sheet_style = Style::default().fg(Color::White);
     let mut sheet_names = model.get_model().workbook.get_worksheet_names();
     loop {
+        // Merged cells of the selected sheet; they drive both the rendering
+        // and the navigation.
+        let merged_cells = model
+            .get_merged_cells(selected_sheet as u32)
+            .unwrap_or_default();
+        // A covered cell can never be selected: snap to the anchor of its
+        // merged cell. This covers sheet changes and undo/redo too.
+        if let Some(m) = merged_cell_containing(
+            &merged_cells,
+            selected_row_index as i32,
+            selected_column_index,
+        ) {
+            if (m.row, m.column) != (selected_row_index as i32, selected_column_index) {
+                selected_row_index = m.row as u16;
+                selected_column_index = m.column;
+                end_row = selected_row_index;
+                end_column = selected_column_index;
+            }
+        }
         terminal.draw(|rect| {
             let size = rect.area();
 
@@ -262,12 +287,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .fg(ironcalc_orange)
                 .add_modifier(Modifier::BOLD);
             let mut footer = vec![Span::styled(" ?", key_style), Span::raw(" for help")];
-            for (key, description) in HELP
-                .iter()
-                .filter(|(key, _)| ["e", "u / r", "f", "q"].contains(key))
-            {
-                footer.push(Span::styled(format!("  {key}"), key_style));
-                footer.push(Span::raw(format!(" {description}")));
+            if let Some(message) = &status_message {
+                footer.push(Span::styled(
+                    format!("  {message}"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                for (key, description) in HELP
+                    .iter()
+                    .filter(|(key, _)| ["e", "u / r", "m / M", "f", "q"].contains(key))
+                {
+                    footer.push(Span::styled(format!("  {key}"), key_style));
+                    footer.push(Span::raw(format!(" {description}")));
+                }
             }
             let status_bar = Paragraph::new(Line::from(footer))
                 .style(Style::default().bg(Color::DarkGray).fg(Color::White));
@@ -382,11 +414,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 row_index += 1;
             }
 
-            let selected_rows = selected_row_index.min(end_row)..=selected_row_index.max(end_row);
-            let selected_columns =
-                selected_column_index.min(end_column)..=selected_column_index.max(end_column);
-            let row_in_selection = |row: u16| whole_column || selected_rows.contains(&row);
+            // The selection grows over the merged cells it touches
+            let selection = selected_area(
+                selected_sheet as u32,
+                (selected_row_index as i32, end_row as i32),
+                (selected_column_index, end_column),
+                whole_row,
+                whole_column,
+                &merged_cells,
+            );
+            let selected_rows = selection.row..=selection.row + selection.height - 1;
+            let selected_columns = selection.column..=selection.column + selection.width - 1;
+            let row_in_selection = |row: u16| whole_column || selected_rows.contains(&(row as i32));
             let column_in_selection = |column: i32| whole_row || selected_columns.contains(&column);
+            // The style of a cell on screen from its own style and the selection
+            let theme = &model.get_model().workbook.theme;
+            let cell_display_style =
+                |row_index: u16, column_index: i32, cell_style: &ironcalc::base::types::Style| {
+                    // With a whole row/column selected the header carries
+                    // the orange, so the active cell just gets the tint.
+                    let mut style = if selected_row_index == row_index
+                        && selected_column_index == column_index
+                        && !whole_row
+                        && !whole_column
+                    {
+                        selected_cell_style
+                    } else {
+                        let bg_rgb = cell_style.fill.color.to_rgb(theme);
+                        let bg_color =
+                            if row_in_selection(row_index) && column_in_selection(column_index) {
+                                selection_bg
+                            } else if bg_rgb.is_empty() {
+                                Color::White
+                            } else {
+                                Color::from_str(&bg_rgb).unwrap_or(Color::White)
+                            };
+                        let fg_rgb = cell_style.font.color.to_rgb(theme);
+                        let fg_color = if fg_rgb.is_empty() {
+                            Color::Black
+                        } else {
+                            Color::from_str(&fg_rgb).unwrap_or(Color::Black)
+                        };
+                        Style::default().fg(fg_color).bg(bg_color)
+                    };
+                    if cell_style.font.b {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if cell_style.font.i {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    if cell_style.font.u {
+                        style = style.add_modifier(Modifier::UNDERLINED);
+                    }
+                    if cell_style.font.strike {
+                        style = style.add_modifier(Modifier::CROSSED_OUT);
+                    }
+                    style
+                };
             for (column_index, width) in &visible_columns {
                 let column_str = number_to_column(*column_index);
                 let in_selection = column_in_selection(*column_index);
@@ -430,56 +514,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 row.push(Cell::from(format!("{}", row_index)).style(style));
                 for (column_index, _) in &visible_columns {
                     let column_index = *column_index;
-                    let value = model
-                        .get_formatted_cell_value(
-                            selected_sheet as u32,
-                            row_index as i32,
-                            column_index,
-                        )
-                        .unwrap();
+                    // Merged cells are painted as a whole over the table
+                    // below, so here they are just blank.
+                    let value =
+                        if merged_cell_containing(&merged_cells, row_index as i32, column_index)
+                            .is_some()
+                        {
+                            String::new()
+                        } else {
+                            model
+                                .get_formatted_cell_value(
+                                    selected_sheet as u32,
+                                    row_index as i32,
+                                    column_index,
+                                )
+                                .unwrap()
+                        };
                     let cell_style = model
                         .get_cell_style(selected_sheet as u32, row_index as i32, column_index)
                         .unwrap();
-                    // With a whole row/column selected the header carries
-                    // the orange, so the active cell just gets the tint.
-                    let mut style = if selected_row_index == row_index
-                        && selected_column_index == column_index
-                        && !whole_row
-                        && !whole_column
-                    {
-                        selected_cell_style
-                    } else {
-                        let theme = &model.get_model().workbook.theme;
-                        let bg_rgb = cell_style.fill.color.to_rgb(theme);
-                        let bg_color =
-                            if row_in_selection(row_index) && column_in_selection(column_index) {
-                                selection_bg
-                            } else if bg_rgb.is_empty() {
-                                Color::White
-                            } else {
-                                Color::from_str(&bg_rgb).unwrap_or(Color::White)
-                            };
-                        let fg_rgb = cell_style.font.color.to_rgb(theme);
-                        let fg_color = if fg_rgb.is_empty() {
-                            Color::Black
-                        } else {
-                            Color::from_str(&fg_rgb).unwrap_or(Color::Black)
-                        };
-                        Style::default().fg(fg_color).bg(bg_color)
-                    };
-                    if cell_style.font.b {
-                        style = style.add_modifier(Modifier::BOLD);
-                    }
-                    if cell_style.font.i {
-                        style = style.add_modifier(Modifier::ITALIC);
-                    }
-                    if cell_style.font.u {
-                        style = style.add_modifier(Modifier::UNDERLINED);
-                    }
-                    if cell_style.font.strike {
-                        style = style.add_modifier(Modifier::CROSSED_OUT);
-                    }
-                    row.push(Cell::from(value.to_string()).style(style));
+                    let style = cell_display_style(row_index, column_index, &cell_style);
+                    row.push(Cell::from(value).style(style));
                     if column_index == frozen_columns {
                         row.push(
                             Cell::from("│\n".repeat(*row_height as usize)).style(frozen_line_style),
@@ -531,6 +586,108 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let formula_bar = Paragraph::new(vec![Line::from(vec![Span::raw(formula_bar_text)])]);
             rect.render_widget(formula_bar.block(Block::default()), spreadsheet_chunks[0]);
             rect.render_widget(spreadsheet, spreadsheet_chunks[1]);
+
+            // Merged cells are painted over the table as a single block
+            // spanning their visible rows and columns, with the anchor's
+            // content and style. Like in the web UI a merged cell reaching
+            // from a frozen pane into the scrolled region is painted once per
+            // pane, clipped to it, so the pane separator stays visible.
+            let table_area = spreadsheet_chunks[1];
+            // Screen position and size of every visible column and row
+            let mut column_tracks: Vec<Track> = Vec::new();
+            let mut x = table_area.x + first_row_width;
+            for (column_index, width) in &visible_columns {
+                column_tracks.push(Track {
+                    index: *column_index,
+                    start: x,
+                    size: *width,
+                });
+                x += width;
+                if *column_index == frozen_columns {
+                    x += 1;
+                }
+            }
+            let mut row_tracks: Vec<Track> = Vec::new();
+            let mut y = table_area.y + 1;
+            for (row_index, height) in &visible_rows {
+                row_tracks.push(Track {
+                    index: *row_index as i32,
+                    start: y,
+                    size: *height,
+                });
+                y += height;
+                if *row_index == frozen_rows {
+                    y += 1;
+                }
+            }
+            for m in &merged_cells {
+                let sheet = selected_sheet as u32;
+                let value = model
+                    .get_formatted_cell_value(sheet, m.row, m.column)
+                    .unwrap_or_default();
+                let cell_style = model.get_cell_style(sheet, m.row, m.column).unwrap();
+                let style = cell_display_style(m.row as u16, m.column, &cell_style);
+                // The text sits on the top line of the whole merged cell,
+                // aligned over its full width (even the part off screen), and
+                // every pane shows the slice that falls inside it.
+                let full_width: usize = (m.column..=m.last_column())
+                    .map(|column| column_char_width(column) as usize)
+                    .sum();
+                let text_length = value.chars().count();
+                let text_start = match cell_style.alignment.as_ref().map(|a| &a.horizontal) {
+                    Some(HorizontalAlignment::Center)
+                    | Some(HorizontalAlignment::CenterContinuous) => {
+                        full_width.saturating_sub(text_length) / 2
+                    }
+                    Some(HorizontalAlignment::Right) => full_width.saturating_sub(text_length),
+                    _ => 0,
+                };
+                let column_panes =
+                    pane_extents(&column_tracks, m.column, m.last_column(), frozen_columns);
+                let row_panes = pane_extents(&row_tracks, m.row, m.last_row(), frozen_rows as i32);
+                for column_pane in &column_panes {
+                    for row_pane in &row_panes {
+                        let area = Rect {
+                            x: column_pane.start,
+                            y: row_pane.start,
+                            width: column_pane.size,
+                            height: row_pane.size,
+                        }
+                        .intersection(table_area);
+                        if area.is_empty() {
+                            continue;
+                        }
+                        rect.render_widget(Block::default().style(style), area);
+                        if row_pane.first != m.row {
+                            // The top line of the merged cell is not in this pane
+                            continue;
+                        }
+                        // The pane shows the window [offset, offset + width)
+                        // of the full width of the merged cell
+                        let offset: usize = (m.column..column_pane.first)
+                            .map(|column| column_char_width(column) as usize)
+                            .sum();
+                        let from = text_start.max(offset);
+                        let to = (text_start + text_length).min(offset + area.width as usize);
+                        if from >= to {
+                            continue;
+                        }
+                        let text: String = value
+                            .chars()
+                            .skip(from - text_start)
+                            .take(to - from)
+                            .collect();
+                        let text_area = Rect {
+                            x: area.x + (from - offset) as u16,
+                            y: area.y,
+                            width: (to - from) as u16,
+                            height: 1,
+                        }
+                        .intersection(area);
+                        rect.render_widget(Paragraph::new(text).style(style), text_area);
+                    }
+                }
+            }
             if cursor_mode == CursorMode::Input {
                 let area = spreadsheet_chunks[0];
                 rect.set_cursor_position((
@@ -583,7 +740,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (key, description) in HELP {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            format!(" {:>9}", key),
+                            format!(" {:>10}", key),
                             Style::default()
                                 .fg(ironcalc_orange)
                                 .add_modifier(Modifier::BOLD),
@@ -708,6 +865,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match rx.recv()? {
                     Event::Input(event) => {
                         let shift = event.modifiers.contains(KeyModifiers::SHIFT);
+                        status_message = None;
+                        // The edges of the merged cell containing a cell (or
+                        // the cell itself): moving away from a merged cell
+                        // starts past its far edge so one keystroke crosses
+                        // the whole merged range.
+                        let merge_edges = |row: u16, column: i32| -> (u16, u16, i32, i32) {
+                            match merged_cell_containing(&merged_cells, row as i32, column) {
+                                Some(m) => {
+                                    (m.row as u16, m.last_row() as u16, m.column, m.last_column())
+                                }
+                                None => (row, row, column, column),
+                            }
+                        };
                         match event.code {
                             KeyCode::Char('q') => {
                                 popup_open = true;
@@ -716,56 +886,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Shift+arrows extend the selection: rows unless whole
                             // columns are selected, columns unless whole rows are.
                             KeyCode::Up if shift => {
-                                if !whole_column && end_row > 1 {
-                                    end_row -= 1;
+                                let (top, _, _, _) = merge_edges(end_row, end_column);
+                                if !whole_column && top > 1 {
+                                    end_row = top - 1;
                                 }
                             }
                             KeyCode::Down if shift => {
+                                let (_, bottom, _, _) = merge_edges(end_row, end_column);
                                 if !whole_column {
-                                    end_row += 1;
+                                    end_row = bottom + 1;
                                 }
                             }
                             KeyCode::Left if shift => {
-                                if !whole_row && end_column > 1 {
-                                    end_column -= 1;
+                                let (_, _, left, _) = merge_edges(end_row, end_column);
+                                if !whole_row && left > 1 {
+                                    end_column = left - 1;
                                 }
                             }
                             KeyCode::Right if shift => {
+                                let (_, _, _, right) = merge_edges(end_row, end_column);
                                 if !whole_row {
-                                    end_column += 1;
+                                    end_column = right + 1;
                                 }
                             }
                             // Going up past row 1 selects the whole column and
                             // going left past column A the whole row; with both,
                             // every cell is selected. Down/Right step back out.
+                            // Landing inside a merged cell selects its anchor
+                            // (see the top of the loop).
                             KeyCode::Down => {
+                                let (_, bottom, _, _) =
+                                    merge_edges(selected_row_index, selected_column_index);
                                 if whole_column {
                                     whole_column = false;
                                     selected_row_index = 1;
                                 } else {
-                                    selected_row_index += 1;
+                                    selected_row_index = bottom + 1;
                                 }
                             }
                             KeyCode::Up => {
-                                if selected_row_index > 1 && !whole_column {
-                                    selected_row_index -= 1;
+                                let (top, _, _, _) =
+                                    merge_edges(selected_row_index, selected_column_index);
+                                if top > 1 && !whole_column {
+                                    selected_row_index = top - 1;
                                 } else {
                                     whole_column = true;
                                 }
                             }
                             KeyCode::Right => {
+                                let (_, _, _, right) =
+                                    merge_edges(selected_row_index, selected_column_index);
                                 if whole_row {
                                     whole_row = false;
                                     selected_column_index = 1;
                                 } else {
-                                    selected_column_index += 1;
+                                    selected_column_index = right + 1;
                                 }
                             }
                             KeyCode::Left => {
-                                if selected_column_index > 1 && !whole_row {
-                                    selected_column_index -= 1;
+                                let (_, _, left, _) =
+                                    merge_edges(selected_row_index, selected_column_index);
+                                if left > 1 && !whole_row {
+                                    selected_column_index = left - 1;
                                 } else {
                                     whole_row = true;
+                                }
+                            }
+                            // Merge the selection (M also centers it), or
+                            // unmerge when it already holds merged cells.
+                            KeyCode::Char(c @ ('m' | 'M')) => {
+                                let sheet = selected_sheet as u32;
+                                let range = selected_area(
+                                    sheet,
+                                    (selected_row_index as i32, end_row as i32),
+                                    (selected_column_index, end_column),
+                                    whole_row,
+                                    whole_column,
+                                    &merged_cells,
+                                );
+                                let intersects_merged = merged_cells.iter().any(|m| {
+                                    m.intersects(range.row, range.column, range.width, range.height)
+                                });
+                                if whole_row || whole_column {
+                                    status_message =
+                                        Some("Cannot merge whole rows or columns".to_string());
+                                } else if intersects_merged {
+                                    if let Err(message) = model.unmerge_cells(&range) {
+                                        status_message = Some(message);
+                                    }
+                                } else if range.width * range.height < 2 {
+                                    status_message =
+                                        Some("Select more than one cell to merge".to_string());
+                                } else {
+                                    let result = if c == 'M' {
+                                        model.merge_cells_center(&range)
+                                    } else {
+                                        model.merge_cells(&range)
+                                    };
+                                    match result {
+                                        Ok(()) => {
+                                            // Select the new merged cell: the
+                                            // anchor with the focus at the far corner
+                                            selected_row_index = range.row as u16;
+                                            selected_column_index = range.column;
+                                            end_row = (range.row + range.height - 1) as u16;
+                                            end_column = range.column + range.width - 1;
+                                        }
+                                        Err(message) => status_message = Some(message),
+                                    }
                                 }
                             }
                             KeyCode::PageDown => {
@@ -860,12 +1088,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         'U' => ("font.u", style.font.u),
                                         _ => ("font.strike", style.font.strike),
                                     };
-                                    let range = selection_area(
+                                    let range = selected_area(
                                         sheet,
                                         (row, end_row as i32),
                                         (column, end_column),
                                         whole_row,
                                         whole_column,
+                                        &merged_cells,
                                     );
                                     let value = if on { "false" } else { "true" };
                                     let _ = model.update_range_style(&range, path, value);
@@ -942,12 +1171,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     KeyCode::Enter => {
                         let (_, hex) = PALETTE[color_picker_index];
-                        let range = selection_area(
+                        let range = selected_area(
                             selected_sheet as u32,
                             (selected_row_index as i32, end_row as i32),
                             (selected_column_index, end_column),
                             whole_row,
                             whole_column,
+                            &merged_cells,
                         );
                         let path = match color_target {
                             ColorTarget::Background => "fill.color",
@@ -1016,6 +1246,122 @@ fn selection_area(
     }
 }
 
+/// A visible row or column: its index and its position and size on screen
+struct Track {
+    index: i32,
+    start: u16,
+    size: u16,
+}
+
+/// The screen extent of a run of tracks: the index of its first track and
+/// its position and size on screen
+#[derive(Debug, PartialEq)]
+struct Extent {
+    first: i32,
+    start: u16,
+    size: u16,
+}
+
+/// The screen extents of the tracks with index in `first..=last`, one per
+/// pane: the frozen tracks (index <= frozen) and the scrolled ones. Panes
+/// with no such track are left out.
+fn pane_extents(tracks: &[Track], first: i32, last: i32, frozen: i32) -> Vec<Extent> {
+    let mut extents = Vec::new();
+    for in_frozen_pane in [true, false] {
+        let pane: Vec<&Track> = tracks
+            .iter()
+            .filter(|track| (track.index <= frozen) == in_frozen_pane)
+            .filter(|track| track.index >= first && track.index <= last)
+            .collect();
+        if let (Some(head), Some(tail)) = (pane.first(), pane.last()) {
+            extents.push(Extent {
+                first: head.index,
+                start: head.start,
+                size: tail.start + tail.size - head.start,
+            });
+        }
+    }
+    extents
+}
+
+/// The merged cell that contains (row, column), if any
+fn merged_cell_containing(
+    merged_cells: &[MergedCell],
+    row: i32,
+    column: i32,
+) -> Option<&MergedCell> {
+    merged_cells.iter().find(|m| m.contains(row, column))
+}
+
+/// Grows `area` until it fully contains every merged cell it touches, so a
+/// selection never covers a merged cell partially (growing over one merged
+/// cell can graze another, hence the loop). Mirrors the engine's
+/// `grow_range_over_merged_cells`.
+fn grow_area_over_merged_cells(area: Area, merged_cells: &[MergedCell]) -> Area {
+    let mut min_row = area.row;
+    let mut max_row = area.row + area.height - 1;
+    let mut min_column = area.column;
+    let mut max_column = area.column + area.width - 1;
+    loop {
+        let mut changed = false;
+        for m in merged_cells {
+            if !m.intersects(
+                min_row,
+                min_column,
+                max_column - min_column + 1,
+                max_row - min_row + 1,
+            ) {
+                continue;
+            }
+            if m.row < min_row {
+                min_row = m.row;
+                changed = true;
+            }
+            if m.last_row() > max_row {
+                max_row = m.last_row();
+                changed = true;
+            }
+            if m.column < min_column {
+                min_column = m.column;
+                changed = true;
+            }
+            if m.last_column() > max_column {
+                max_column = m.last_column();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Area {
+        sheet: area.sheet,
+        row: min_row,
+        column: min_column,
+        width: max_column - min_column + 1,
+        height: max_row - min_row + 1,
+    }
+}
+
+/// The selected range as the user sees it: [selection_area] grown over the
+/// merged cells it touches. Whole row/column selections are left alone: like
+/// in the engine they may slice through merged cells.
+fn selected_area(
+    sheet: u32,
+    rows: (i32, i32),
+    columns: (i32, i32),
+    whole_row: bool,
+    whole_column: bool,
+    merged_cells: &[MergedCell],
+) -> Area {
+    let area = selection_area(sheet, rows, columns, whole_row, whole_column);
+    if whole_row || whole_column {
+        area
+    } else {
+        grow_area_over_merged_cells(area, merged_cells)
+    }
+}
+
 /// helper function to create a centered rect using up certain percentage of the available rect `r`
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::vertical([
@@ -1054,5 +1400,107 @@ mod tests {
             (area.row, area.height, area.column, area.width),
             (2, 3, 1, LAST_COLUMN)
         );
+    }
+
+    fn merged(row: i32, column: i32, width: i32, height: i32) -> MergedCell {
+        MergedCell {
+            row,
+            column,
+            width,
+            height,
+        }
+    }
+
+    fn area(row: i32, column: i32, width: i32, height: i32) -> Area {
+        Area {
+            sheet: 0,
+            row,
+            column,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn selection_grows_over_merged_cells() {
+        // B2:C3 merged and D3:D5 merged: touching B2 drags in C3, which
+        // touches D3:D5, which drags in rows 4 and 5.
+        let merged_cells = [merged(2, 2, 2, 2), merged(3, 4, 1, 3)];
+        let grown = grow_area_over_merged_cells(area(2, 2, 1, 1), &merged_cells);
+        assert_eq!(
+            (grown.row, grown.column, grown.width, grown.height),
+            (2, 2, 2, 2)
+        );
+        let grown = grow_area_over_merged_cells(area(3, 3, 1, 1), &merged_cells);
+        assert_eq!(
+            (grown.row, grown.column, grown.width, grown.height),
+            (2, 2, 2, 2)
+        );
+        let grown = grow_area_over_merged_cells(area(3, 2, 3, 1), &merged_cells);
+        assert_eq!(
+            (grown.row, grown.column, grown.width, grown.height),
+            (2, 2, 3, 4)
+        );
+        // Nothing merged in A1
+        let grown = grow_area_over_merged_cells(area(1, 1, 1, 1), &merged_cells);
+        assert_eq!(
+            (grown.row, grown.column, grown.width, grown.height),
+            (1, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn whole_rows_and_columns_slice_merged_cells() {
+        let merged_cells = [merged(2, 2, 2, 2)];
+        let selected = selected_area(0, (2, 2), (1, 1), true, false, &merged_cells);
+        assert_eq!((selected.row, selected.height), (2, 1));
+        let selected = selected_area(0, (2, 2), (2, 2), false, false, &merged_cells);
+        assert_eq!(
+            (
+                selected.row,
+                selected.column,
+                selected.width,
+                selected.height
+            ),
+            (2, 2, 2, 2)
+        );
+        assert!(merged_cell_containing(&merged_cells, 3, 3).is_some());
+        assert!(merged_cell_containing(&merged_cells, 4, 3).is_none());
+    }
+
+    #[test]
+    fn pane_extents_split_at_the_frozen_pane() {
+        // Columns A (frozen), then C and D visible after scrolling, with the
+        // one-cell separator after the frozen pane.
+        let tracks = [
+            Track {
+                index: 1,
+                start: 3,
+                size: 4,
+            },
+            Track {
+                index: 3,
+                start: 8,
+                size: 5,
+            },
+            Track {
+                index: 4,
+                start: 13,
+                size: 5,
+            },
+        ];
+        let extent = |first, start, size| Extent { first, start, size };
+        // A merged cell over A:D is painted in both panes
+        assert_eq!(
+            pane_extents(&tracks, 1, 4, 1),
+            vec![extent(1, 3, 4), extent(3, 8, 10)]
+        );
+        // One over C:D only in the scrolled pane
+        assert_eq!(pane_extents(&tracks, 3, 4, 1), vec![extent(3, 8, 10)]);
+        // One over B:C is only partially visible
+        assert_eq!(pane_extents(&tracks, 2, 3, 1), vec![extent(3, 8, 5)]);
+        // Without frozen columns everything is one pane
+        assert_eq!(pane_extents(&tracks, 1, 4, 0), vec![extent(1, 3, 15)]);
+        assert!(pane_extents(&tracks, 5, 6, 0).is_empty());
     }
 }
