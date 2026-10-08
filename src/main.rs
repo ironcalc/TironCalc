@@ -512,8 +512,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     header_style
                 };
                 row.push(Cell::from(format!("{}", row_index)).style(style));
-                for (column_index, _) in &visible_columns {
+                for (column_index, width) in &visible_columns {
                     let column_index = *column_index;
+                    let cell_style = model
+                        .get_cell_style(selected_sheet as u32, row_index as i32, column_index)
+                        .unwrap();
                     // Merged cells are painted as a whole over the table
                     // below, so here they are just blank.
                     let value =
@@ -522,17 +525,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             String::new()
                         } else {
-                            model
+                            let value = model
                                 .get_formatted_cell_value(
                                     selected_sheet as u32,
                                     row_index as i32,
                                     column_index,
                                 )
-                                .unwrap()
+                                .unwrap();
+                            // Wrapped text flows into the lines of a tall row
+                            if cell_style.alignment.as_ref().is_some_and(|a| a.wrap_text) {
+                                wrap_text(&value, *width as usize).join("\n")
+                            } else {
+                                value
+                            }
                         };
-                    let cell_style = model
-                        .get_cell_style(selected_sheet as u32, row_index as i32, column_index)
-                        .unwrap();
                     let style = cell_display_style(row_index, column_index, &cell_style);
                     row.push(Cell::from(value).style(style));
                     if column_index == frozen_columns {
@@ -627,20 +633,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_default();
                 let cell_style = model.get_cell_style(sheet, m.row, m.column).unwrap();
                 let style = cell_display_style(m.row as u16, m.column, &cell_style);
-                // The text sits on the top line of the whole merged cell,
-                // aligned over its full width (even the part off screen), and
-                // every pane shows the slice that falls inside it.
+                // The text is laid out over the whole merged cell, aligned
+                // over its full width (even the part off screen) and wrapped
+                // over its full height when the style says so. Every pane
+                // shows the slice of lines and columns that falls inside it.
                 let full_width: usize = (m.column..=m.last_column())
                     .map(|column| column_char_width(column) as usize)
                     .sum();
-                let text_length = value.chars().count();
-                let text_start = match cell_style.alignment.as_ref().map(|a| &a.horizontal) {
-                    Some(HorizontalAlignment::Center)
-                    | Some(HorizontalAlignment::CenterContinuous) => {
-                        full_width.saturating_sub(text_length) / 2
+                let wraps = cell_style.alignment.as_ref().is_some_and(|a| a.wrap_text);
+                let lines = if wraps {
+                    wrap_text(&value, full_width)
+                } else {
+                    vec![value.clone()]
+                };
+                let line_start = |line: &str| -> usize {
+                    let length = line.chars().count();
+                    match cell_style.alignment.as_ref().map(|a| &a.horizontal) {
+                        Some(HorizontalAlignment::Center)
+                        | Some(HorizontalAlignment::CenterContinuous) => {
+                            full_width.saturating_sub(length) / 2
+                        }
+                        Some(HorizontalAlignment::Right) => full_width.saturating_sub(length),
+                        _ => 0,
                     }
-                    Some(HorizontalAlignment::Right) => full_width.saturating_sub(text_length),
-                    _ => 0,
                 };
                 let column_panes =
                     pane_extents(&column_tracks, m.column, m.last_column(), frozen_columns);
@@ -658,33 +673,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         rect.render_widget(Block::default().style(style), area);
-                        if row_pane.first != m.row {
-                            // The top line of the merged cell is not in this pane
-                            continue;
-                        }
-                        // The pane shows the window [offset, offset + width)
-                        // of the full width of the merged cell
+                        // The pane shows the window of the merged cell that
+                        // starts `offset` columns and `line_offset` lines
+                        // into it
                         let offset: usize = (m.column..column_pane.first)
                             .map(|column| column_char_width(column) as usize)
                             .sum();
-                        let from = text_start.max(offset);
-                        let to = (text_start + text_length).min(offset + area.width as usize);
-                        if from >= to {
-                            continue;
+                        let line_offset: usize = (m.row..row_pane.first)
+                            .map(|row| row_line_height(row as u16) as usize)
+                            .sum();
+                        for (line_index, line) in lines
+                            .iter()
+                            .enumerate()
+                            .skip(line_offset)
+                            .take(area.height as usize)
+                        {
+                            let text_start = line_start(line);
+                            let from = text_start.max(offset);
+                            let to = (text_start + line.chars().count())
+                                .min(offset + area.width as usize);
+                            if from >= to {
+                                continue;
+                            }
+                            let text: String = line
+                                .chars()
+                                .skip(from - text_start)
+                                .take(to - from)
+                                .collect();
+                            let text_area = Rect {
+                                x: area.x + (from - offset) as u16,
+                                y: area.y + (line_index - line_offset) as u16,
+                                width: (to - from) as u16,
+                                height: 1,
+                            }
+                            .intersection(area);
+                            rect.render_widget(Paragraph::new(text).style(style), text_area);
                         }
-                        let text: String = value
-                            .chars()
-                            .skip(from - text_start)
-                            .take(to - from)
-                            .collect();
-                        let text_area = Rect {
-                            x: area.x + (from - offset) as u16,
-                            y: area.y,
-                            width: (to - from) as u16,
-                            height: 1,
-                        }
-                        .intersection(area);
-                        rect.render_widget(Paragraph::new(text).style(style), text_area);
                     }
                 }
             }
@@ -1284,6 +1308,41 @@ fn pane_extents(tracks: &[Track], first: i32, last: i32, frozen: i32) -> Vec<Ext
     extents
 }
 
+/// Word-wraps `text` to lines of at most `width` characters: lines break at
+/// spaces (and at explicit newlines), words longer than a line are split.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        let mut line_length = 0;
+        for word in paragraph.split(' ') {
+            let mut word: Vec<char> = word.chars().collect();
+            // A word that does not fit the rest of the line starts a new one
+            if line_length > 0 && line_length + 1 + word.len() > width {
+                lines.push(std::mem::take(&mut line));
+                line_length = 0;
+            }
+            if line_length > 0 {
+                line.push(' ');
+                line_length += 1;
+            }
+            // Split the words longer than a line
+            while word.len() > width - line_length {
+                let rest = word.split_off(width - line_length);
+                line.extend(&word);
+                lines.push(std::mem::take(&mut line));
+                line_length = 0;
+                word = rest;
+            }
+            line_length += word.len();
+            line.extend(&word);
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// The merged cell that contains (row, column), if any
 fn merged_cell_containing(
     merged_cells: &[MergedCell],
@@ -1502,5 +1561,23 @@ mod tests {
         // Without frozen columns everything is one pane
         assert_eq!(pane_extents(&tracks, 1, 4, 0), vec![extent(1, 3, 15)]);
         assert!(pane_extents(&tracks, 5, 6, 0).is_empty());
+    }
+
+    #[test]
+    fn wrap_text_breaks_at_spaces_and_long_words() {
+        assert_eq!(
+            wrap_text("Hello merged world", 10),
+            ["Hello", "merged", "world"]
+        );
+        assert_eq!(
+            wrap_text("Hello merged world", 12),
+            ["Hello merged", "world"]
+        );
+        assert_eq!(wrap_text("Hello merged world", 30), ["Hello merged world"]);
+        assert_eq!(wrap_text("abcdefghijkl", 5), ["abcde", "fghij", "kl"]);
+        assert_eq!(wrap_text("ab cdefghijkl", 5), ["ab", "cdefg", "hijkl"]);
+        assert_eq!(wrap_text("one\ntwo three", 5), ["one", "two", "three"]);
+        assert!(wrap_text("", 5).is_empty());
+        assert_eq!(wrap_text("a", 0), ["a"]);
     }
 }
