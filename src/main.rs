@@ -218,16 +218,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let spreadsheet_height = size.height.saturating_sub(2);
             let row_count = spreadsheet_height.saturating_sub(1);
 
-            let status_bar = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " ?",
-                    Style::default()
-                        .fg(Color::LightGreen)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" for help"),
-            ]))
-            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+            let key_style = Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD);
+            let mut footer = vec![Span::styled(" ?", key_style), Span::raw(" for help")];
+            for (key, description) in HELP
+                .iter()
+                .filter(|(key, _)| ["e", "u / r", "f", "q"].contains(key))
+            {
+                footer.push(Span::styled(format!("  {key}"), key_style));
+                footer.push(Span::raw(format!(" {description}")));
+            }
+            let status_bar = Paragraph::new(Line::from(footer))
+                .style(Style::default().bg(Color::DarkGray).fg(Color::White));
             rect.render_widget(status_bar, outer_chunks[1]);
 
             let first_row_width: u16 = 3;
