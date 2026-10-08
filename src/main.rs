@@ -22,6 +22,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
     Terminal,
 };
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{io, sync::mpsc};
 use std::{str::FromStr, thread};
@@ -100,7 +102,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // UserModel wraps the engine model and keeps an undo/redo history.
     let mut model = if args.len() > 1 {
         file_name = &args[1];
-        UserModel::from_model(load_from_xlsx(file_name, "en", "UTC", "en").unwrap())
+        // Large workbooks take a while to load: show a spinner meanwhile.
+        // It waits one frame before drawing so small files load silently.
+        let loading = AtomicBool::new(true);
+        let workbook = thread::scope(|scope| {
+            scope.spawn(|| {
+                let start = Instant::now();
+                for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().cycle() {
+                    thread::sleep(Duration::from_millis(100));
+                    if !loading.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // Spinner in IronCalc orange (#F2994A)
+                    print!(
+                        "\r\x1b[38;2;242;153;74m{frame}\x1b[0m Loading {file_name}… {:.1}s",
+                        start.elapsed().as_secs_f64()
+                    );
+                    let _ = io::stdout().flush();
+                }
+                // Clear the spinner line
+                print!("\r\x1b[2K");
+                let _ = io::stdout().flush();
+            });
+            let workbook = load_from_xlsx(file_name, "en", "UTC", "en");
+            loading.store(false, Ordering::Relaxed);
+            workbook
+        });
+        UserModel::from_model(workbook.unwrap())
     } else {
         UserModel::new_empty(file_name, "en", "UTC", "en").unwrap()
     };
