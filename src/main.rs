@@ -107,6 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut selected_sheet = 0;
     let mut selected_row_index = 1;
     let mut selected_column_index = 1;
+    // Shift+arrows extend the selection from the selected cell to this one
+    let mut end_row = selected_row_index;
+    let mut end_column = selected_column_index;
     // Whole row/column selection; both together select every cell.
     let mut whole_row = false;
     let mut whole_column = false;
@@ -284,14 +287,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             minimum_column_index = minimum_column_index.max(frozen_columns + 1);
             minimum_row_index = minimum_row_index.max(frozen_rows + 1);
 
-            // We want to make sure the selected cell is fully visible. A
-            // selected cell inside the frozen panes is always visible.
-            if selected_column_index > frozen_columns {
-                if selected_column_index < minimum_column_index {
-                    minimum_column_index = selected_column_index;
+            // We want to make sure the moving end of the selection is fully
+            // visible. A cell inside the frozen panes is always visible.
+            if end_column > frozen_columns {
+                if end_column < minimum_column_index {
+                    minimum_column_index = end_column;
                 }
-                while minimum_column_index < selected_column_index {
-                    let width: u16 = (minimum_column_index..=selected_column_index)
+                while minimum_column_index < end_column {
+                    let width: u16 = (minimum_column_index..=end_column)
                         .map(column_char_width)
                         .sum();
                     if width <= scroll_width {
@@ -300,14 +303,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     minimum_column_index += 1;
                 }
             }
-            if selected_row_index > frozen_rows {
-                if selected_row_index < minimum_row_index {
-                    minimum_row_index = selected_row_index;
+            if end_row > frozen_rows {
+                if end_row < minimum_row_index {
+                    minimum_row_index = end_row;
                 }
-                while minimum_row_index < selected_row_index {
-                    let height: u16 = (minimum_row_index..=selected_row_index)
-                        .map(row_line_height)
-                        .sum();
+                while minimum_row_index < end_row {
+                    let height: u16 = (minimum_row_index..=end_row).map(row_line_height).sum();
                     if height <= scroll_height {
                         break;
                     }
@@ -353,9 +354,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 row_index += 1;
             }
 
+            let selected_rows = selected_row_index.min(end_row)..=selected_row_index.max(end_row);
+            let selected_columns =
+                selected_column_index.min(end_column)..=selected_column_index.max(end_column);
+            let row_in_selection = |row: u16| whole_column || selected_rows.contains(&row);
+            let column_in_selection = |column: i32| whole_row || selected_columns.contains(&column);
             for (column_index, width) in &visible_columns {
                 let column_str = number_to_column(*column_index);
-                let in_selection = whole_row || *column_index == selected_column_index;
+                let in_selection = column_in_selection(*column_index);
                 // Orange when the whole column is selected
                 let style = if in_selection && whole_column {
                     selected_cell_style
@@ -382,7 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (row_index, row_height) in &visible_rows {
                 let row_index = *row_index;
                 let mut row = Vec::new();
-                let in_selection = whole_column || row_index == selected_row_index;
+                let in_selection = row_in_selection(row_index);
                 // Orange when the whole row is selected
                 let style = if in_selection && whole_row {
                     selected_cell_style
@@ -417,15 +423,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         let theme = &model.get_model().workbook.theme;
                         let bg_rgb = cell_style.fill.color.to_rgb(theme);
-                        let in_selection = (whole_column || selected_row_index == row_index)
-                            && (whole_row || selected_column_index == column_index);
-                        let bg_color = if in_selection {
-                            selection_bg
-                        } else if bg_rgb.is_empty() {
-                            Color::White
-                        } else {
-                            Color::from_str(&bg_rgb).unwrap_or(Color::White)
-                        };
+                        let bg_color =
+                            if row_in_selection(row_index) && column_in_selection(column_index) {
+                                selection_bg
+                            } else if bg_rgb.is_empty() {
+                                Color::White
+                            } else {
+                                Color::from_str(&bg_rgb).unwrap_or(Color::White)
+                            };
                         let fg_rgb = cell_style.font.color.to_rgb(theme);
                         let fg_color = if fg_rgb.is_empty() {
                             Color::Black
@@ -673,173 +678,219 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CursorMode::Navigate => {
                 match rx.recv()? {
-                    Event::Input(event) => match event.code {
-                        KeyCode::Char('q') => {
-                            popup_open = true;
-                            cursor_mode = CursorMode::Popup;
-                        }
-                        // Going up past row 1 selects the whole column and
-                        // going left past column A the whole row; with both,
-                        // every cell is selected. Down/Right step back out.
-                        KeyCode::Down => {
-                            if whole_column {
-                                whole_column = false;
-                                selected_row_index = 1;
-                            } else {
-                                selected_row_index += 1;
+                    Event::Input(event) => {
+                        let shift = event.modifiers.contains(KeyModifiers::SHIFT);
+                        match event.code {
+                            KeyCode::Char('q') => {
+                                popup_open = true;
+                                cursor_mode = CursorMode::Popup;
+                            }
+                            // Shift+arrows extend the selection: rows unless whole
+                            // columns are selected, columns unless whole rows are.
+                            KeyCode::Up if shift => {
+                                if !whole_column && end_row > 1 {
+                                    end_row -= 1;
+                                }
+                            }
+                            KeyCode::Down if shift => {
+                                if !whole_column {
+                                    end_row += 1;
+                                }
+                            }
+                            KeyCode::Left if shift => {
+                                if !whole_row && end_column > 1 {
+                                    end_column -= 1;
+                                }
+                            }
+                            KeyCode::Right if shift => {
+                                if !whole_row {
+                                    end_column += 1;
+                                }
+                            }
+                            // Going up past row 1 selects the whole column and
+                            // going left past column A the whole row; with both,
+                            // every cell is selected. Down/Right step back out.
+                            KeyCode::Down => {
+                                if whole_column {
+                                    whole_column = false;
+                                    selected_row_index = 1;
+                                } else {
+                                    selected_row_index += 1;
+                                }
+                            }
+                            KeyCode::Up => {
+                                if selected_row_index > 1 && !whole_column {
+                                    selected_row_index -= 1;
+                                } else {
+                                    whole_column = true;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if whole_row {
+                                    whole_row = false;
+                                    selected_column_index = 1;
+                                } else {
+                                    selected_column_index += 1;
+                                }
+                            }
+                            KeyCode::Left => {
+                                if selected_column_index > 1 && !whole_row {
+                                    selected_column_index -= 1;
+                                } else {
+                                    whole_row = true;
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                selected_row_index += 10;
+                            }
+                            KeyCode::PageUp => {
+                                if selected_row_index > 10 {
+                                    selected_row_index -= 10;
+                                } else {
+                                    selected_row_index = 1;
+                                }
+                            }
+                            KeyCode::Char('s') => {
+                                selected_sheet += 1;
+                                if selected_sheet >= sheet_names.len() {
+                                    selected_sheet = 0;
+                                }
+                            }
+                            KeyCode::Char('a') => {
+                                selected_sheet = selected_sheet.saturating_sub(1);
+                            }
+                            KeyCode::Char('e') => {
+                                cursor_mode = CursorMode::Input;
+                                let input_str = model
+                                    .get_cell_content(
+                                        selected_sheet as u32,
+                                        selected_row_index as i32,
+                                        selected_column_index,
+                                    )
+                                    .unwrap_or_default();
+                                input_formula = input_formula.with_value(input_str);
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = model.new_sheet();
+                                sheet_names = model.get_model().workbook.get_worksheet_names();
+                            }
+                            KeyCode::Char('u') => {
+                                let _ = model.undo();
+                            }
+                            KeyCode::Char('r') => {
+                                let _ = model.redo();
+                            }
+                            KeyCode::Char('>') | KeyCode::Char('.') => {
+                                let sheet = selected_sheet as u32;
+                                let column = selected_column_index;
+                                if let Ok(width) = model.get_column_width(sheet, column) {
+                                    let _ = model.set_columns_width(
+                                        sheet,
+                                        column,
+                                        column,
+                                        width + COLUMN_WIDTH_FACTOR,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('<') | KeyCode::Char(',') => {
+                                let sheet = selected_sheet as u32;
+                                let column = selected_column_index;
+                                if let Ok(width) = model.get_column_width(sheet, column) {
+                                    let width =
+                                        (width - COLUMN_WIDTH_FACTOR).max(COLUMN_WIDTH_FACTOR);
+                                    let _ = model.set_columns_width(sheet, column, column, width);
+                                }
+                            }
+                            KeyCode::Char('=') => {
+                                let sheet = selected_sheet as u32;
+                                let row = selected_row_index as i32;
+                                if let Ok(height) = model.get_row_height(sheet, row) {
+                                    let _ = model.set_rows_height(
+                                        sheet,
+                                        row,
+                                        row,
+                                        height + ROW_PX_PER_LINE,
+                                    );
+                                }
+                            }
+                            KeyCode::Char('-') => {
+                                let sheet = selected_sheet as u32;
+                                let row = selected_row_index as i32;
+                                if let Ok(height) = model.get_row_height(sheet, row) {
+                                    let height = (height - ROW_PX_PER_LINE).max(ROW_PX_PER_LINE);
+                                    let _ = model.set_rows_height(sheet, row, row, height);
+                                }
+                            }
+                            KeyCode::Char(c @ ('B' | 'I' | 'U' | 'S')) => {
+                                let sheet = selected_sheet as u32;
+                                let row = selected_row_index as i32;
+                                let column = selected_column_index;
+                                if let Ok(style) = model.get_cell_style(sheet, row, column) {
+                                    let (path, on) = match c {
+                                        'B' => ("font.b", style.font.b),
+                                        'I' => ("font.i", style.font.i),
+                                        'U' => ("font.u", style.font.u),
+                                        _ => ("font.strike", style.font.strike),
+                                    };
+                                    let range = selection_area(
+                                        sheet,
+                                        (row, end_row as i32),
+                                        (column, end_column),
+                                        whole_row,
+                                        whole_column,
+                                    );
+                                    let value = if on { "false" } else { "true" };
+                                    let _ = model.update_range_style(&range, path, value);
+                                }
+                            }
+                            KeyCode::Char('?') => {
+                                cursor_mode = CursorMode::Help;
+                            }
+                            KeyCode::Char('f') => {
+                                let sheet = selected_sheet as u32;
+                                let new_rows = (selected_row_index - 1) as i32;
+                                let new_columns = selected_column_index - 1;
+                                let rows = model.get_frozen_rows_count(sheet).unwrap_or(0);
+                                let columns = model.get_frozen_columns_count(sheet).unwrap_or(0);
+                                // Freezing at the same spot (or at A1) unfreezes.
+                                if new_rows == rows && new_columns == columns {
+                                    let _ = model.set_frozen_rows_count(sheet, 0);
+                                    let _ = model.set_frozen_columns_count(sheet, 0);
+                                } else {
+                                    let _ = model.set_frozen_rows_count(sheet, new_rows);
+                                    let _ = model.set_frozen_columns_count(sheet, new_columns);
+                                }
+                            }
+                            KeyCode::Char('b') => {
+                                color_target = ColorTarget::Background;
+                                color_picker_index = 0;
+                                cursor_mode = CursorMode::ColorPicker;
+                            }
+                            KeyCode::Char('c') => {
+                                color_target = ColorTarget::Text;
+                                color_picker_index = 0;
+                                cursor_mode = CursorMode::ColorPicker;
+                            }
+                            _ => {
+                                // println!("{:?}", event);
                             }
                         }
-                        KeyCode::Up => {
-                            if selected_row_index > 1 && !whole_column {
-                                selected_row_index -= 1;
-                            } else {
-                                whole_column = true;
-                            }
+                        // Moving without Shift collapses the selection
+                        if !shift
+                            && matches!(
+                                event.code,
+                                KeyCode::Up
+                                    | KeyCode::Down
+                                    | KeyCode::Left
+                                    | KeyCode::Right
+                                    | KeyCode::PageUp
+                                    | KeyCode::PageDown
+                            )
+                        {
+                            end_row = selected_row_index;
+                            end_column = selected_column_index;
                         }
-                        KeyCode::Right => {
-                            if whole_row {
-                                whole_row = false;
-                                selected_column_index = 1;
-                            } else {
-                                selected_column_index += 1;
-                            }
-                        }
-                        KeyCode::Left => {
-                            if selected_column_index > 1 && !whole_row {
-                                selected_column_index -= 1;
-                            } else {
-                                whole_row = true;
-                            }
-                        }
-                        KeyCode::PageDown => {
-                            selected_row_index += 10;
-                        }
-                        KeyCode::PageUp => {
-                            if selected_row_index > 10 {
-                                selected_row_index -= 10;
-                            } else {
-                                selected_row_index = 1;
-                            }
-                        }
-                        KeyCode::Char('s') => {
-                            selected_sheet += 1;
-                            if selected_sheet >= sheet_names.len() {
-                                selected_sheet = 0;
-                            }
-                        }
-                        KeyCode::Char('a') => {
-                            selected_sheet = selected_sheet.saturating_sub(1);
-                        }
-                        KeyCode::Char('e') => {
-                            cursor_mode = CursorMode::Input;
-                            let input_str = model
-                                .get_cell_content(
-                                    selected_sheet as u32,
-                                    selected_row_index as i32,
-                                    selected_column_index,
-                                )
-                                .unwrap_or_default();
-                            input_formula = input_formula.with_value(input_str);
-                        }
-                        KeyCode::Char('+') => {
-                            let _ = model.new_sheet();
-                            sheet_names = model.get_model().workbook.get_worksheet_names();
-                        }
-                        KeyCode::Char('u') => {
-                            let _ = model.undo();
-                        }
-                        KeyCode::Char('r') => {
-                            let _ = model.redo();
-                        }
-                        KeyCode::Char('>') | KeyCode::Char('.') => {
-                            let sheet = selected_sheet as u32;
-                            let column = selected_column_index;
-                            if let Ok(width) = model.get_column_width(sheet, column) {
-                                let _ = model.set_columns_width(
-                                    sheet,
-                                    column,
-                                    column,
-                                    width + COLUMN_WIDTH_FACTOR,
-                                );
-                            }
-                        }
-                        KeyCode::Char('<') | KeyCode::Char(',') => {
-                            let sheet = selected_sheet as u32;
-                            let column = selected_column_index;
-                            if let Ok(width) = model.get_column_width(sheet, column) {
-                                let width = (width - COLUMN_WIDTH_FACTOR).max(COLUMN_WIDTH_FACTOR);
-                                let _ = model.set_columns_width(sheet, column, column, width);
-                            }
-                        }
-                        KeyCode::Char('=') => {
-                            let sheet = selected_sheet as u32;
-                            let row = selected_row_index as i32;
-                            if let Ok(height) = model.get_row_height(sheet, row) {
-                                let _ = model.set_rows_height(
-                                    sheet,
-                                    row,
-                                    row,
-                                    height + ROW_PX_PER_LINE,
-                                );
-                            }
-                        }
-                        KeyCode::Char('-') => {
-                            let sheet = selected_sheet as u32;
-                            let row = selected_row_index as i32;
-                            if let Ok(height) = model.get_row_height(sheet, row) {
-                                let height = (height - ROW_PX_PER_LINE).max(ROW_PX_PER_LINE);
-                                let _ = model.set_rows_height(sheet, row, row, height);
-                            }
-                        }
-                        KeyCode::Char(c @ ('B' | 'I' | 'U' | 'S')) => {
-                            let sheet = selected_sheet as u32;
-                            let row = selected_row_index as i32;
-                            let column = selected_column_index;
-                            if let Ok(style) = model.get_cell_style(sheet, row, column) {
-                                let (path, on) = match c {
-                                    'B' => ("font.b", style.font.b),
-                                    'I' => ("font.i", style.font.i),
-                                    'U' => ("font.u", style.font.u),
-                                    _ => ("font.strike", style.font.strike),
-                                };
-                                let range =
-                                    selection_area(sheet, row, column, whole_row, whole_column);
-                                let value = if on { "false" } else { "true" };
-                                let _ = model.update_range_style(&range, path, value);
-                            }
-                        }
-                        KeyCode::Char('?') => {
-                            cursor_mode = CursorMode::Help;
-                        }
-                        KeyCode::Char('f') => {
-                            let sheet = selected_sheet as u32;
-                            let new_rows = (selected_row_index - 1) as i32;
-                            let new_columns = selected_column_index - 1;
-                            let rows = model.get_frozen_rows_count(sheet).unwrap_or(0);
-                            let columns = model.get_frozen_columns_count(sheet).unwrap_or(0);
-                            // Freezing at the same spot (or at A1) unfreezes.
-                            if new_rows == rows && new_columns == columns {
-                                let _ = model.set_frozen_rows_count(sheet, 0);
-                                let _ = model.set_frozen_columns_count(sheet, 0);
-                            } else {
-                                let _ = model.set_frozen_rows_count(sheet, new_rows);
-                                let _ = model.set_frozen_columns_count(sheet, new_columns);
-                            }
-                        }
-                        KeyCode::Char('b') => {
-                            color_target = ColorTarget::Background;
-                            color_picker_index = 0;
-                            cursor_mode = CursorMode::ColorPicker;
-                        }
-                        KeyCode::Char('c') => {
-                            color_target = ColorTarget::Text;
-                            color_picker_index = 0;
-                            cursor_mode = CursorMode::ColorPicker;
-                        }
-                        _ => {
-                            // println!("{:?}", event);
-                        }
-                    },
+                    }
                     Event::Tick => {}
                 }
             }
@@ -865,8 +916,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let (_, hex) = PALETTE[color_picker_index];
                         let range = selection_area(
                             selected_sheet as u32,
-                            selected_row_index as i32,
-                            selected_column_index,
+                            (selected_row_index as i32, end_row as i32),
+                            (selected_column_index, end_column),
                             whole_row,
                             whole_column,
                         );
@@ -909,17 +960,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The selected range: the active cell, or its whole row/column, or every cell
-fn selection_area(sheet: u32, row: i32, column: i32, whole_row: bool, whole_column: bool) -> Area {
+/// The selected range: the cells between `rows` and `columns` (each a pair of
+/// opposite ends), widened to whole rows/columns or every cell
+fn selection_area(
+    sheet: u32,
+    rows: (i32, i32),
+    columns: (i32, i32),
+    whole_row: bool,
+    whole_column: bool,
+) -> Area {
     let (column, width) = if whole_row {
         (1, LAST_COLUMN)
     } else {
-        (column, 1)
+        (columns.0.min(columns.1), (columns.0 - columns.1).abs() + 1)
     };
     let (row, height) = if whole_column {
         (1, LAST_ROW)
     } else {
-        (row, 1)
+        (rows.0.min(rows.1), (rows.0 - rows.1).abs() + 1)
     };
     Area {
         sheet,
@@ -945,4 +1003,28 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_area_spans_both_ends() {
+        let area = selection_area(0, (6, 3), (2, 2), false, false);
+        assert_eq!(
+            (area.row, area.height, area.column, area.width),
+            (3, 4, 2, 1)
+        );
+        let area = selection_area(0, (1, 1), (5, 3), false, true);
+        assert_eq!(
+            (area.row, area.height, area.column, area.width),
+            (1, LAST_ROW, 3, 3)
+        );
+        let area = selection_area(0, (2, 4), (1, 1), true, false);
+        assert_eq!(
+            (area.row, area.height, area.column, area.width),
+            (2, 3, 1, LAST_COLUMN)
+        );
+    }
 }
