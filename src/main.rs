@@ -145,16 +145,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let header_style = Style::default().fg(Color::Black).bg(Color::Gray);
-    let frozen_header_style = Style::default().fg(Color::White).bg(Color::DarkGray);
+    // IronCalc brand orange
+    let ironcalc_orange = Color::Rgb(0xF2, 0x99, 0x4A);
+    let header_style = Style::default().fg(Color::Black).bg(Color::Rgb(0xC8, 0xC8, 0xC8));
+    let frozen_header_style = Style::default().fg(Color::White).bg(Color::Rgb(0x6E, 0x6E, 0x6E));
     let selected_header_style = Style::default()
         .fg(Color::Black)
-        .bg(Color::Cyan)
+        .bg(Color::Rgb(0xA8, 0xA8, 0xA8))
         .add_modifier(Modifier::BOLD);
 
     let selected_cell_style = Style::default()
         .fg(Color::Black)
-        .bg(Color::LightCyan)
+        .bg(ironcalc_orange)
         .add_modifier(Modifier::BOLD);
 
     let background_style = Style::default().bg(Color::Black);
