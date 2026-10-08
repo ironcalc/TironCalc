@@ -219,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let row_count = spreadsheet_height.saturating_sub(1);
 
             let key_style = Style::default()
-                .fg(Color::LightGreen)
+                .fg(ironcalc_orange)
                 .add_modifier(Modifier::BOLD);
             let mut footer = vec![Span::styled(" ?", key_style), Span::raw(" for help")];
             for (key, description) in HELP
@@ -527,7 +527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Span::styled(
                             format!(" {:>9}", key),
                             Style::default()
-                                .fg(Color::Green)
+                                .fg(ironcalc_orange)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw("  "),
