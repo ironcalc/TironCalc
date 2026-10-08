@@ -147,12 +147,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // IronCalc brand orange
     let ironcalc_orange = Color::Rgb(0xF2, 0x99, 0x4A);
-    let header_style = Style::default().fg(Color::Black).bg(Color::Rgb(0xC8, 0xC8, 0xC8));
-    let frozen_header_style = Style::default().fg(Color::White).bg(Color::Rgb(0x6E, 0x6E, 0x6E));
+    let header_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(0xC8, 0xC8, 0xC8));
+    let frozen_header_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::Rgb(0x6E, 0x6E, 0x6E));
     let selected_header_style = Style::default()
         .fg(Color::Black)
         .bg(Color::Rgb(0xA8, 0xA8, 0xA8))
         .add_modifier(Modifier::BOLD);
+    let frozen_line_color = Color::Rgb(0x50, 0x50, 0x50);
+    let frozen_line_style = Style::default().fg(frozen_line_color).bg(Color::White);
 
     let selected_cell_style = Style::default()
         .fg(Color::Black)
@@ -254,6 +260,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .get_frozen_columns_count(selected_sheet as u32)
                 .unwrap_or(0)
                 .max(0);
+            // Reserve one cell for the frozen pane separator lines
+            let available_width = available_width.saturating_sub((frozen_columns > 0) as u16);
+            let row_count = row_count.saturating_sub((frozen_rows > 0) as u16);
             let frozen_width: u16 = (1..=frozen_columns).map(column_char_width).sum();
             let frozen_height: u16 = (1..=frozen_rows).map(row_line_height).sum();
             let scroll_width = available_width.saturating_sub(frozen_width);
@@ -349,6 +358,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ))
                     .style(style),
                 );
+                if *column_index == frozen_columns {
+                    row.push(Cell::from("│").style(header_style.fg(frozen_line_color)));
+                }
             }
             rows.push(Row::new(row));
             for (row_index, row_height) in &visible_rows {
@@ -407,13 +419,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         style = style.add_modifier(Modifier::CROSSED_OUT);
                     }
                     row.push(Cell::from(value.to_string()).style(style));
+                    if column_index == frozen_columns {
+                        row.push(
+                            Cell::from("│\n".repeat(*row_height as usize)).style(frozen_line_style),
+                        );
+                    }
                 }
                 rows.push(Row::new(row).height(*row_height));
+                if row_index == frozen_rows {
+                    let mut line = vec![Cell::from("─".repeat(first_row_width as usize))
+                        .style(header_style.fg(frozen_line_color))];
+                    for (column_index, width) in &visible_columns {
+                        line.push(Cell::from("─".repeat(*width as usize)).style(frozen_line_style));
+                        if *column_index == frozen_columns {
+                            line.push(Cell::from("┼").style(frozen_line_style));
+                        }
+                    }
+                    rows.push(Row::new(line));
+                }
             }
             let mut widths = Vec::new();
             widths.push(Constraint::Length(first_row_width));
-            for (_, width) in &visible_columns {
+            for (column_index, width) in &visible_columns {
                 widths.push(Constraint::Length(*width));
+                if *column_index == frozen_columns {
+                    widths.push(Constraint::Length(1));
+                }
             }
             let spreadsheet = Table::new(rows, widths)
                 .block(Block::default().style(Style::default().bg(Color::Black)))
