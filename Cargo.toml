@@ -18,7 +18,7 @@ crossterm = "0.28.0"
 # Uses the git repository when built locally; the version from crates.io
 # is used when the crate is published.
 # https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#multiple-locations
-ironcalc = { git = "https://github.com/ironcalc/IronCalc", version = "0.8.3" }
+ironcalc = { git = "https://github.com/ironcalc/IronCalc" }
 ratatui = "0.29.0"
 tui-input = "0.11.0"
 

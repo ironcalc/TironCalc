@@ -30,7 +30,7 @@ Load an existing Excel file:
 ```
 $ tiron example.xlsx
 ```
--   `Arrow Keys` to navigate cells
+-   `Arrow Keys` to navigate cells (`Shift` + arrows extends the selection)
 -   `e` to edit a cell and enter the value or formula.
 -   `u`/`r` to undo/redo
 -   `q` to quit and save
@@ -42,6 +42,8 @@ $ tiron example.xlsx
 -   `B`/`I`/`U`/`S` to toggle bold/italic/underline/strikethrough
 -   `<`/`>` (or `,`/`.`) to make the current column narrower/wider
 -   `-`/`=` to make the current row shorter/taller
+-   `m` to merge the selected cells into one (`M` also centers the
+    content); on a selection with merged cells it unmerges them
 -   `f` to freeze the rows above and the columns to the left of the current
     cell; press it again on the same cell (or on A1) to unfreeze
 -   `?` to show the keyboard shortcuts
