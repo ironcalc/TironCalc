@@ -53,7 +53,7 @@ enum CursorMode {
     Help,
 }
 
-const HELP: [(&str, &str); 17] = [
+const HELP: [(&str, &str); 18] = [
     ("↑↓←→", "navigate cells"),
     ("Shift+↑↓←→", "extend the selection"),
     ("PgUp/PgDn", "jump 10 rows"),
@@ -67,7 +67,8 @@ const HELP: [(&str, &str); 17] = [
     ("- / =", "shorter/taller row"),
     ("m / M", "merge (& center)/unmerge"),
     ("f", "freeze/unfreeze panes"),
-    ("s / a", "next/previous sheet"),
+    ("Ctrl+PgDn/PgUp", "next/previous sheet"),
+    ("Opt+Right/Left", "next/previous sheet (Mac)"),
     ("+", "add a sheet"),
     ("?", "this help"),
     ("q", "quit (asks to save)"),
@@ -789,7 +790,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if cursor_mode == CursorMode::Help {
-                let width = 40.min(size.width);
+                let width = 44.min(size.width);
                 let height = (HELP.len() as u16 + 3).min(size.height);
                 let area = Rect {
                     x: size.width.saturating_sub(width) / 2,
@@ -802,7 +803,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (key, description) in HELP {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            format!(" {:>10}", key),
+                            format!(" {:>14}", key),
                             Style::default()
                                 .fg(ironcalc_orange)
                                 .add_modifier(Modifier::BOLD),
@@ -962,10 +963,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 None => (row, row, column, column),
                             }
                         };
+                        let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+                        let alt = event.modifiers.contains(KeyModifiers::ALT);
                         match event.code {
                             KeyCode::Char('q') => {
                                 popup_open = true;
                                 cursor_mode = CursorMode::Popup;
+                            }
+                            // Next/previous sheet, as in Excel: Ctrl+PageDown/PageUp
+                            // everywhere and Option+Right/Left on the Mac. Terminal.app
+                            // and iTerm2 send Option+Right/Left as ESC f / ESC b by
+                            // default, which crossterm reports as Alt+f / Alt+b.
+                            KeyCode::PageDown if ctrl => {
+                                selected_sheet += 1;
+                                if selected_sheet >= sheet_names.len() {
+                                    selected_sheet = 0;
+                                }
+                            }
+                            KeyCode::PageUp if ctrl => {
+                                selected_sheet = selected_sheet.saturating_sub(1);
+                            }
+                            KeyCode::Right | KeyCode::Char('f') if alt => {
+                                selected_sheet += 1;
+                                if selected_sheet >= sheet_names.len() {
+                                    selected_sheet = 0;
+                                }
+                            }
+                            KeyCode::Left | KeyCode::Char('b') if alt => {
+                                selected_sheet = selected_sheet.saturating_sub(1);
                             }
                             // Shift+arrows extend the selection: rows unless whole
                             // columns are selected, columns unless whole rows are.
@@ -1089,15 +1114,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     selected_row_index = 1;
                                 }
-                            }
-                            KeyCode::Char('s') => {
-                                selected_sheet += 1;
-                                if selected_sheet >= sheet_names.len() {
-                                    selected_sheet = 0;
-                                }
-                            }
-                            KeyCode::Char('a') => {
-                                selected_sheet = selected_sheet.saturating_sub(1);
                             }
                             KeyCode::Char('e') => {
                                 cursor_mode = CursorMode::Input;
