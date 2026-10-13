@@ -35,8 +35,8 @@ $ tiron example.xlsx
 -   `u`/`r` to undo/redo
 -   `q` to quit and save. It asks for confirmation before replacing a file other than the one opened, and before saving a workbook created with another application (IronCalc may not keep all of its features).
 -   `+` to add a sheet
--   `s` to go to the next sheet
--   `a` to go to the previous sheet
+-   `Ctrl+PageDown`/`Ctrl+PageUp` to go to the next/previous sheet
+    (`Option+Right`/`Option+Left` on a Mac, as in Excel)
 -   `b` to pick a background color for the current cell
 -   `c` to pick a text color for the current cell
 -   `B`/`I`/`U`/`S` to toggle bold/italic/underline/strikethrough
