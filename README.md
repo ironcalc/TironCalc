@@ -33,7 +33,7 @@ $ tiron example.xlsx
 -   `Arrow Keys` to navigate cells (`Shift` + arrows extends the selection)
 -   `e` to edit a cell and enter the value or formula.
 -   `u`/`r` to undo/redo
--   `q` to quit and save
+-   `q` to quit and save. Saving back to a file last saved by IronCalc never asks; replacing any other existing file asks for confirmation first.
 -   `+` to add a sheet
 -   `s` to go to the next sheet
 -   `a` to go to the previous sheet

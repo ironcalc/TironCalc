@@ -10,10 +10,11 @@ use ironcalc::{
     base::{
         expressions::types::Area,
         expressions::utils::number_to_column,
+        new_empty::APPLICATION,
         types::{HorizontalAlignment, MergedCell},
-        UserModel, COLUMN_WIDTH_FACTOR,
+        Model, UserModel, COLUMN_WIDTH_FACTOR,
     },
-    export::save_to_xlsx,
+    export::save_xlsx_to_writer,
     import::load_from_xlsx,
 };
 use ratatui::{
@@ -24,7 +25,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
     Terminal,
 };
-use std::io::Write;
+use std::fs;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{io, sync::mpsc};
@@ -43,6 +46,9 @@ enum CursorMode {
     Navigate,
     Input,
     Popup,
+    // Save would replace a file the user did not open or did not last save
+    // with IronCalc: ask first.
+    ConfirmOverwrite,
     ColorPicker,
     Help,
 }
@@ -136,6 +142,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         UserModel::new_empty(file_name, "en", "UTC", "en").unwrap()
     };
+    // The file the workbook was loaded from; saving back to it does not ask
+    // for confirmation when the file was last saved by IronCalc.
+    let opened_file: Option<PathBuf> = (args.len() > 1).then(|| PathBuf::from(file_name));
     let mut selected_sheet = 0;
     let mut selected_row_index = 1;
     let mut selected_column_index = 1;
@@ -726,28 +735,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let area = centered_rect(60, 20, size);
                 rect.render_widget(Clear, area);
                 let input_text = input_file_name.value();
-                let text = vec![
-                    Line::from(vec![input_text.fg(Color::Yellow)]),
-                    "".into(),
-                    Line::from(vec![
-                        "Esc".green(),
-                        " to abort. ".into(),
-                        "Ctrl+Q".green(),
-                        " to quit without saving. ".into(),
-                        "Enter".green(),
-                        " to save and quit".into(),
-                    ]),
-                ];
-                rect.render_widget(
-                    Paragraph::new(text).block(Block::bordered().title("Save as")),
-                    area,
-                );
-                rect.set_cursor_position((
-                    // Put cursor past the end of the input text
-                    area.x + (input_file_name.visual_cursor() as u16) + 1,
-                    // Move one line own, from the border to the input line
-                    area.y + 1,
-                ))
+                if cursor_mode == CursorMode::ConfirmOverwrite {
+                    let text = vec![
+                        Line::from(vec![
+                            input_text.fg(Color::Yellow),
+                            " already exists.".into(),
+                        ]),
+                        "".into(),
+                        Line::from(vec![
+                            "y".green(),
+                            " to overwrite. ".into(),
+                            "n".green(),
+                            " to change the name. ".into(),
+                            "Ctrl+Q".green(),
+                            " to quit without saving".into(),
+                        ]),
+                    ];
+                    rect.render_widget(
+                        Paragraph::new(text).block(Block::bordered().title("Overwrite?")),
+                        area,
+                    );
+                } else {
+                    let mut text = vec![
+                        Line::from(vec![input_text.fg(Color::Yellow)]),
+                        "".into(),
+                        Line::from(vec![
+                            "Esc".green(),
+                            " to abort. ".into(),
+                            "Ctrl+Q".green(),
+                            " to quit without saving. ".into(),
+                            "Enter".green(),
+                            " to save and quit".into(),
+                        ]),
+                    ];
+                    // Why the last save attempt failed
+                    if let Some(message) = &status_message {
+                        text.push(Line::from(message.clone().red()));
+                    }
+                    rect.render_widget(
+                        Paragraph::new(text).block(Block::bordered().title("Save as")),
+                        area,
+                    );
+                    rect.set_cursor_position((
+                        // Put cursor past the end of the input text
+                        area.x + (input_file_name.visual_cursor() as u16) + 1,
+                        // Move one line own, from the border to the input line
+                        area.y + 1,
+                    ))
+                }
             }
 
             if cursor_mode == CursorMode::Help {
@@ -832,47 +867,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match cursor_mode {
             CursorMode::Popup => {
-                match rx.recv()? {
-                    Event::Input(event) => match event.code {
+                if let Event::Input(event) = rx.recv()? {
+                    status_message = None;
+                    match event.code {
                         // Ctrl+Q quits without saving (End kept as a fallback)
                         KeyCode::Char('q') | KeyCode::Char('Q')
                             if event.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
-                            terminal.clear()?;
-                            // restore terminal
-                            disable_raw_mode()?;
-                            execute!(
-                                terminal.backend_mut(),
-                                LeaveAlternateScreen,
-                                DisableMouseCapture
-                            )?;
-                            terminal.show_cursor()?;
+                            restore_terminal(&mut terminal)?;
                             break;
                         }
                         KeyCode::End => {
-                            terminal.clear()?;
-                            // restore terminal
-                            disable_raw_mode()?;
-                            execute!(
-                                terminal.backend_mut(),
-                                LeaveAlternateScreen,
-                                DisableMouseCapture
-                            )?;
-                            terminal.show_cursor()?;
+                            restore_terminal(&mut terminal)?;
                             break;
                         }
                         KeyCode::Enter => {
-                            terminal.clear()?;
-                            // restore terminal
-                            disable_raw_mode()?;
-                            execute!(
-                                terminal.backend_mut(),
-                                LeaveAlternateScreen,
-                                DisableMouseCapture
-                            )?;
-                            terminal.show_cursor()?;
-                            let _ = save_to_xlsx(model.get_model(), input_file_name.value());
-                            break;
+                            let target = Path::new(input_file_name.value());
+                            if needs_overwrite_confirmation(
+                                model.get_model(),
+                                target,
+                                opened_file.as_deref(),
+                            ) {
+                                cursor_mode = CursorMode::ConfirmOverwrite;
+                            } else {
+                                match save_workbook(model.get_model(), target) {
+                                    Ok(()) => {
+                                        restore_terminal(&mut terminal)?;
+                                        break;
+                                    }
+                                    Err(message) => status_message = Some(message),
+                                }
+                            }
                         }
                         KeyCode::Esc => {
                             popup_open = false;
@@ -881,8 +906,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {
                             input_file_name.handle_event(&CEvent::Key(event));
                         }
-                    },
-                    Event::Tick => {}
+                    }
+                }
+            }
+            CursorMode::ConfirmOverwrite => {
+                if let Event::Input(event) = rx.recv()? {
+                    match event.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q')
+                            if event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            restore_terminal(&mut terminal)?;
+                            break;
+                        }
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            match save_workbook(
+                                model.get_model(),
+                                Path::new(input_file_name.value()),
+                            ) {
+                                Ok(()) => {
+                                    restore_terminal(&mut terminal)?;
+                                    break;
+                                }
+                                Err(message) => {
+                                    status_message = Some(message);
+                                    cursor_mode = CursorMode::Popup;
+                                }
+                            }
+                        }
+                        // Back to the file name input
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            cursor_mode = CursorMode::Popup;
+                        }
+                        _ => {}
+                    }
                 }
             }
             CursorMode::Navigate => {
@@ -1240,6 +1296,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Leaves the alternate screen and raw mode, bringing the terminal back to
+/// its state before the app started
+fn restore_terminal<W: Write>(terminal: &mut Terminal<CrosstermBackend<W>>) -> io::Result<()> {
+    terminal.clear()?;
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()
+}
+
+/// Whether saving to `target` should ask the user first. It does unless
+/// `target` is the file the workbook was opened from and that file was last
+/// saved by IronCalc (the xlsx records the application that wrote it), or no
+/// file would be replaced at all.
+fn needs_overwrite_confirmation(
+    model: &Model<'_>,
+    target: &Path,
+    opened_file: Option<&Path>,
+) -> bool {
+    if !target.exists() {
+        return false;
+    }
+    let same_file = opened_file.is_some_and(|opened| {
+        match (fs::canonicalize(opened), fs::canonicalize(target)) {
+            (Ok(opened), Ok(target)) => opened == target,
+            _ => opened == target,
+        }
+    });
+    !(same_file && model.workbook.metadata.application == APPLICATION)
+}
+
+/// Saves the workbook as xlsx, replacing `target` if it exists. The workbook
+/// is written to a temporary file next to the target and then renamed over
+/// it, so a failed export leaves the previous file untouched.
+fn save_workbook(model: &Model<'_>, target: &Path) -> Result<(), String> {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("Invalid file name: '{}'", target.display()))?;
+    let temporary = target.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let file = fs::File::create(&temporary).map_err(|e| e.to_string())?;
+        let writer = save_xlsx_to_writer(model, BufWriter::new(file)).map_err(|e| e.to_string())?;
+        // Flush the buffer and close the file before renaming it
+        drop(writer.into_inner().map_err(|e| e.to_string())?);
+        fs::rename(&temporary, target).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(|e| format!("Could not save '{file_name}': {e}"))
 }
 
 /// The selected range: the cells between `rows` and `columns` (each a pair of
