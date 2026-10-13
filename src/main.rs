@@ -22,7 +22,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Terminal,
 };
 use std::fs;
@@ -46,9 +46,9 @@ enum CursorMode {
     Navigate,
     Input,
     Popup,
-    // Save would replace a file the user did not open or did not last save
-    // with IronCalc: ask first.
-    ConfirmOverwrite,
+    // Save would replace another file or drop features of a workbook created
+    // with another application: ask first.
+    ConfirmSave,
     ColorPicker,
     Help,
 }
@@ -163,6 +163,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_file_name: Input = file_name.into();
 
     let mut popup_open = false;
+    // Why the save needs confirming (see `save_warnings`)
+    let mut save_warnings: Vec<String> = Vec::new();
     let mut color_target = ColorTarget::Background;
     let mut color_picker_index = 0;
     // Shown in the status bar until the next key press (e.g. why a merge failed)
@@ -732,29 +734,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if popup_open {
-                let area = centered_rect(60, 20, size);
-                rect.render_widget(Clear, area);
                 let input_text = input_file_name.value();
-                if cursor_mode == CursorMode::ConfirmOverwrite {
-                    let text = vec![
-                        Line::from(vec![
-                            input_text.fg(Color::Yellow),
-                            " already exists.".into(),
-                        ]),
-                        "".into(),
-                        Line::from(vec![
-                            "y".green(),
-                            " to overwrite. ".into(),
-                            "n".green(),
-                            " to change the name. ".into(),
-                            "Ctrl+Q".green(),
-                            " to quit without saving".into(),
-                        ]),
-                    ];
-                    rect.render_widget(
-                        Paragraph::new(text).block(Block::bordered().title("Overwrite?")),
-                        area,
-                    );
+                let confirming = cursor_mode == CursorMode::ConfirmSave;
+                let (title, text) = if confirming {
+                    let mut text: Vec<Line> = save_warnings
+                        .iter()
+                        .map(|warning| Line::from(warning.clone().yellow()))
+                        .collect();
+                    text.push("".into());
+                    text.push(Line::from(vec![
+                        "y".green(),
+                        " to save anyway. ".into(),
+                        "n".green(),
+                        " to change the name. ".into(),
+                        "Ctrl+Q".green(),
+                        " to quit without saving".into(),
+                    ]));
+                    ("Save anyway?", text)
                 } else {
                     let mut text = vec![
                         Line::from(vec![input_text.fg(Color::Yellow)]),
@@ -772,10 +768,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(message) = &status_message {
                         text.push(Line::from(message.clone().red()));
                     }
-                    rect.render_widget(
-                        Paragraph::new(text).block(Block::bordered().title("Save as")),
-                        area,
-                    );
+                    ("Save as", text)
+                };
+                let area = popup_rect(&text, size);
+                rect.render_widget(Clear, area);
+                rect.render_widget(
+                    Paragraph::new(text)
+                        .wrap(Wrap { trim: false })
+                        .block(Block::bordered().title(title)),
+                    area,
+                );
+                if !confirming {
                     rect.set_cursor_position((
                         // Put cursor past the end of the input text
                         area.x + (input_file_name.visual_cursor() as u16) + 1,
@@ -883,12 +886,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Enter => {
                             let target = Path::new(input_file_name.value());
-                            if needs_overwrite_confirmation(
+                            save_warnings = warnings_for_save(
                                 model.get_model(),
                                 target,
                                 opened_file.as_deref(),
-                            ) {
-                                cursor_mode = CursorMode::ConfirmOverwrite;
+                            );
+                            if !save_warnings.is_empty() {
+                                cursor_mode = CursorMode::ConfirmSave;
                             } else {
                                 match save_workbook(model.get_model(), target) {
                                     Ok(()) => {
@@ -909,7 +913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            CursorMode::ConfirmOverwrite => {
+            CursorMode::ConfirmSave => {
                 if let Event::Input(event) = rx.recv()? {
                     match event.code {
                         KeyCode::Char('q') | KeyCode::Char('Q')
@@ -1311,25 +1315,54 @@ fn restore_terminal<W: Write>(terminal: &mut Terminal<CrosstermBackend<W>>) -> i
     terminal.show_cursor()
 }
 
-/// Whether saving to `target` should ask the user first. It does unless
-/// `target` is the file the workbook was opened from and that file was last
-/// saved by IronCalc (the xlsx records the application that wrote it), or no
-/// file would be replaced at all.
-fn needs_overwrite_confirmation(
-    model: &Model<'_>,
-    target: &Path,
-    opened_file: Option<&Path>,
-) -> bool {
-    if !target.exists() {
-        return false;
-    }
+/// Why saving to `target` should be confirmed first; empty when it can go
+/// ahead. Replacing a file other than the one the workbook was opened from is
+/// one reason. The other is a workbook created with another application (the
+/// xlsx records which): IronCalc does not keep everything it may contain.
+fn warnings_for_save(model: &Model<'_>, target: &Path, opened_file: Option<&Path>) -> Vec<String> {
+    let mut warnings = Vec::new();
     let same_file = opened_file.is_some_and(|opened| {
         match (fs::canonicalize(opened), fs::canonicalize(target)) {
             (Ok(opened), Ok(target)) => opened == target,
             _ => opened == target,
         }
     });
-    !(same_file && model.workbook.metadata.application == APPLICATION)
+    if target.exists() && !same_file {
+        warnings.push(format!("{} already exists.", target.display()));
+    }
+    let application = model.workbook.metadata.application.trim();
+    if application != APPLICATION {
+        let created_with = if application.is_empty() || application == "Unknown application" {
+            "another application".to_string()
+        } else {
+            application.to_string()
+        };
+        warnings.push(format!(
+            "This workbook was created with {created_with}. Saving it with IronCalc \
+             may lose features it does not support (charts, images, comments, \
+             pivot tables, data validation...)."
+        ));
+    }
+    warnings
+}
+
+/// A centered rectangle for a popup showing `lines` inside a border: 60% of
+/// the screen wide, as tall as the (wrapped) text needs.
+fn popup_rect(lines: &[Line], screen: Rect) -> Rect {
+    let width = (screen.width * 3 / 5).clamp(20.min(screen.width), screen.width);
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    // Word-wrapped like the paragraph will be
+    let text_height: usize = lines
+        .iter()
+        .map(|line| wrap_text(&line.to_string(), inner_width).len().max(1))
+        .sum();
+    let height = (text_height as u16 + 2).min(screen.height);
+    Rect {
+        x: (screen.width - width) / 2,
+        y: (screen.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Saves the workbook as xlsx, replacing `target` if it exists. The workbook
@@ -1532,23 +1565,6 @@ fn selected_area(
     } else {
         grow_area_over_merged_cells(area, merged_cells)
     }
-}
-
-/// helper function to create a centered rect using up certain percentage of the available rect `r`
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .split(r);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .split(popup_layout[1])[1]
 }
 
 #[cfg(test)]
