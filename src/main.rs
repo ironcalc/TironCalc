@@ -1,10 +1,14 @@
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEventKind,
-        KeyModifiers,
+        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ironcalc::{
     base::{
@@ -53,7 +57,7 @@ enum CursorMode {
     Help,
 }
 
-const HELP: [(&str, &str); 18] = [
+const HELP: [(&str, &str); 19] = [
     ("↑↓←→", "navigate cells"),
     ("Shift+↑↓←→", "extend the selection"),
     ("PgUp/PgDn", "jump 10 rows"),
@@ -61,8 +65,9 @@ const HELP: [(&str, &str); 18] = [
     ("u / r", "undo/redo"),
     ("b", "background color"),
     ("c", "text color"),
-    ("B / I / U", "bold/italic/underline"),
-    ("S", "strikethrough"),
+    ("Ctrl+B/I/U", "bold/italic/underline"),
+    ("Ctrl+5", "strikethrough"),
+    ("Del/Backspace", "clear the selected cells"),
     ("< / >", "narrower/wider column"),
     ("- / =", "shorter/taller row"),
     ("m / M", "merge (& center)/unmerge"),
@@ -107,6 +112,11 @@ const PALETTE: [(&str, Option<&str>); 12] = [
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+    // With the kitty keyboard protocol the terminal tells Ctrl+I apart from
+    // Tab (and Ctrl+2 from Ctrl+Space). Terminal.app and older terminals
+    // don't support it. Queried before the event reader thread starts since
+    // the answer arrives as input.
+    let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
 
     let args: Vec<String> = env::args().collect();
     let mut file_name = "model.xlsx";
@@ -196,6 +206,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if keyboard_enhanced {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -878,11 +894,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('q') | KeyCode::Char('Q')
                             if event.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
-                            restore_terminal(&mut terminal)?;
+                            restore_terminal(&mut terminal, keyboard_enhanced)?;
                             break;
                         }
                         KeyCode::End => {
-                            restore_terminal(&mut terminal)?;
+                            restore_terminal(&mut terminal, keyboard_enhanced)?;
                             break;
                         }
                         KeyCode::Enter => {
@@ -897,7 +913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 match save_workbook(model.get_model(), target) {
                                     Ok(()) => {
-                                        restore_terminal(&mut terminal)?;
+                                        restore_terminal(&mut terminal, keyboard_enhanced)?;
                                         break;
                                     }
                                     Err(message) => status_message = Some(message),
@@ -920,7 +936,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('q') | KeyCode::Char('Q')
                             if event.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
-                            restore_terminal(&mut terminal)?;
+                            restore_terminal(&mut terminal, keyboard_enhanced)?;
                             break;
                         }
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -929,7 +945,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Path::new(input_file_name.value()),
                             ) {
                                 Ok(()) => {
-                                    restore_terminal(&mut terminal)?;
+                                    restore_terminal(&mut terminal, keyboard_enhanced)?;
                                     break;
                                 }
                                 Err(message) => {
@@ -991,6 +1007,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             KeyCode::Left | KeyCode::Char('b') if alt => {
                                 selected_sheet = selected_sheet.saturating_sub(1);
+                            }
+                            // Bold/italic/underline/strikethrough on the selection, as
+                            // in Excel: Ctrl+B/I/U and Ctrl+5, or the older Ctrl+2/4.
+                            // The selected cell decides the direction of the toggle.
+                            // Without the keyboard enhancement, Ctrl+I reaches us as
+                            // Tab and Ctrl+2 as Ctrl+Space (Tab is otherwise unused).
+                            KeyCode::Char('b' | '2' | ' ' | 'i' | 'u' | '4' | '5')
+                            | KeyCode::Tab
+                                if ctrl || (event.code == KeyCode::Tab && !keyboard_enhanced) =>
+                            {
+                                let path = match event.code {
+                                    KeyCode::Char('b' | '2' | ' ') => "font.b",
+                                    KeyCode::Char('i') | KeyCode::Tab => "font.i",
+                                    KeyCode::Char('u' | '4') => "font.u",
+                                    _ => "font.strike",
+                                };
+                                let range = selected_area(
+                                    selected_sheet as u32,
+                                    (selected_row_index as i32, end_row as i32),
+                                    (selected_column_index, end_column),
+                                    whole_row,
+                                    whole_column,
+                                    &merged_cells,
+                                );
+                                if let Err(message) = toggle_font_style(
+                                    &mut model,
+                                    path,
+                                    (selected_row_index as i32, selected_column_index),
+                                    &range,
+                                ) {
+                                    status_message = Some(message);
+                                }
+                            }
+                            // Delete (or the Mac's Backspace-style delete key) clears the
+                            // contents of the selection and keeps the formatting, as in
+                            // Excel. Whole rows/columns are clipped to the used area.
+                            KeyCode::Delete | KeyCode::Backspace => {
+                                let sheet = selected_sheet as u32;
+                                let mut range = selected_area(
+                                    sheet,
+                                    (selected_row_index as i32, end_row as i32),
+                                    (selected_column_index, end_column),
+                                    whole_row,
+                                    whole_column,
+                                    &merged_cells,
+                                );
+                                if whole_row || whole_column {
+                                    if let Ok(worksheet) =
+                                        model.get_model().workbook.worksheet(sheet)
+                                    {
+                                        let dimension = worksheet.dimension();
+                                        if whole_row {
+                                            range.width = dimension.max_column;
+                                        }
+                                        if whole_column {
+                                            range.height = dimension.max_row;
+                                        }
+                                    }
+                                }
+                                if let Err(message) = model.range_clear_contents(&range) {
+                                    status_message = Some(message);
+                                }
                             }
                             // Shift+arrows extend the selection: rows unless whole
                             // columns are selected, columns unless whole rows are.
@@ -1177,29 +1255,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = model.set_rows_height(sheet, row, row, height);
                                 }
                             }
-                            KeyCode::Char(c @ ('B' | 'I' | 'U' | 'S')) => {
-                                let sheet = selected_sheet as u32;
-                                let row = selected_row_index as i32;
-                                let column = selected_column_index;
-                                if let Ok(style) = model.get_cell_style(sheet, row, column) {
-                                    let (path, on) = match c {
-                                        'B' => ("font.b", style.font.b),
-                                        'I' => ("font.i", style.font.i),
-                                        'U' => ("font.u", style.font.u),
-                                        _ => ("font.strike", style.font.strike),
-                                    };
-                                    let range = selected_area(
-                                        sheet,
-                                        (row, end_row as i32),
-                                        (column, end_column),
-                                        whole_row,
-                                        whole_column,
-                                        &merged_cells,
-                                    );
-                                    let value = if on { "false" } else { "true" };
-                                    let _ = model.update_range_style(&range, path, value);
-                                }
-                            }
                             KeyCode::Char('?') => {
                                 cursor_mode = CursorMode::Help;
                             }
@@ -1320,9 +1375,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Leaves the alternate screen and raw mode, bringing the terminal back to
 /// its state before the app started
-fn restore_terminal<W: Write>(terminal: &mut Terminal<CrosstermBackend<W>>) -> io::Result<()> {
+fn restore_terminal<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    keyboard_enhanced: bool,
+) -> io::Result<()> {
     terminal.clear()?;
     disable_raw_mode()?;
+    if keyboard_enhanced {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
@@ -1581,6 +1642,27 @@ fn selected_area(
     } else {
         grow_area_over_merged_cells(area, merged_cells)
     }
+}
+
+/// Toggles a boolean font style (`font.b`, `font.i`, `font.u` or
+/// `font.strike`) over `range`. As in Excel the selected (anchor) cell decides
+/// the direction: if it already has the style, the whole range loses it,
+/// otherwise the whole range gets it. Doing it twice undoes it.
+fn toggle_font_style(
+    model: &mut UserModel,
+    path: &str,
+    anchor: (i32, i32),
+    range: &Area,
+) -> Result<(), String> {
+    let style = model.get_cell_style(range.sheet, anchor.0, anchor.1)?;
+    let on = match path {
+        "font.b" => style.font.b,
+        "font.i" => style.font.i,
+        "font.u" => style.font.u,
+        _ => style.font.strike,
+    };
+    let value = if on { "false" } else { "true" };
+    model.update_range_style(range, path, value)
 }
 
 #[cfg(test)]
