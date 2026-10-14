@@ -39,7 +39,9 @@ $ tiron example.xlsx
     (`Option+Right`/`Option+Left` on a Mac, as in Excel)
 -   `b` to pick a background color for the current cell
 -   `c` to pick a text color for the current cell
--   `B`/`I`/`U`/`S` to toggle bold/italic/underline/strikethrough
+-   `Ctrl+B`/`Ctrl+I`/`Ctrl+U`/`Ctrl+5` to toggle bold/italic/underline/strikethrough
+    on the selected cells, as in Excel (`Ctrl+2`/`Ctrl+4` also work for bold/underline)
+-   `Delete` (or `Backspace`) to clear the contents of the selected cells
 -   `<`/`>` (or `,`/`.`) to make the current column narrower/wider
 -   `-`/`=` to make the current row shorter/taller
 -   `m` to merge the selected cells into one (`M` also centers the
