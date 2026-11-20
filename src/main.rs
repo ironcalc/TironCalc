@@ -16,7 +16,7 @@ use ironcalc::{
         expressions::utils::number_to_column,
         new_empty::APPLICATION,
         types::{HorizontalAlignment, MergedCell},
-        Model, UserModel, COLUMN_WIDTH_FACTOR,
+        ClipboardData, Model, UserModel, COLUMN_WIDTH_FACTOR,
     },
     export::save_xlsx_to_writer,
     import::load_from_xlsx,
@@ -57,7 +57,7 @@ enum CursorMode {
     Help,
 }
 
-const HELP: [(&str, &str); 19] = [
+const HELP: [(&str, &str); 20] = [
     ("↑↓←→", "navigate cells"),
     ("Shift+↑↓←→", "extend the selection"),
     ("PgUp/PgDn", "jump 10 rows"),
@@ -67,6 +67,7 @@ const HELP: [(&str, &str); 19] = [
     ("c", "text color"),
     ("Ctrl+B/I/U", "bold/italic/underline"),
     ("Ctrl+5", "strikethrough"),
+    ("y / x / p", "copy/cut/paste"),
     ("Del/Backspace", "clear the selected cells"),
     ("< / >", "narrower/wider column"),
     ("- / =", "shorter/taller row"),
@@ -180,6 +181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut color_picker_index = 0;
     // Shown in the status bar until the next key press (e.g. why a merge failed)
     let mut status_message: Option<String> = None;
+    // What `y`/`x` took, for `p`
+    let mut clipboard: Option<Copied> = None;
 
     let (tx, rx) = mpsc::channel();
     let tick_rate = Duration::from_millis(200);
@@ -981,7 +984,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
                         let alt = event.modifiers.contains(KeyModifiers::ALT);
+                        // Vim style: y(ank) copies, x cuts, p pastes. Ctrl+C/X/V too.
+                        let clip = match (event.code, ctrl) {
+                            (KeyCode::Char('y'), false) | (KeyCode::Char('c'), true) => Some('y'),
+                            (KeyCode::Char('x'), _) => Some('x'),
+                            (KeyCode::Char('p'), false) | (KeyCode::Char('v'), true) => Some('p'),
+                            _ => None,
+                        };
                         match event.code {
+                            _ if clip.is_some() => {
+                                let sheet = selected_sheet as u32;
+                                let anchor = (selected_row_index as i32, selected_column_index);
+                                let result = if clip == Some('p') {
+                                    match &clipboard {
+                                        Some(c) => {
+                                            let cut = c.cut;
+                                            paste(&mut model, sheet, anchor, c).map(|_| {
+                                                // A cut can be pasted only once
+                                                if cut {
+                                                    clipboard = None;
+                                                }
+                                            })
+                                        }
+                                        None => Err("Nothing to paste".to_string()),
+                                    }
+                                } else {
+                                    let area = selected_area(
+                                        sheet,
+                                        (selected_row_index as i32, end_row as i32),
+                                        (selected_column_index, end_column),
+                                        whole_row,
+                                        whole_column,
+                                        &merged_cells,
+                                    );
+                                    copy_area(&mut model, anchor, &area, clip == Some('x')).map(
+                                        |c| {
+                                            to_system_clipboard(&c.text);
+                                            status_message = Some(
+                                                if c.cut {
+                                                    "Cut: press p to paste"
+                                                } else {
+                                                    "Copied"
+                                                }
+                                                .to_string(),
+                                            );
+                                            clipboard = Some(c);
+                                        },
+                                    )
+                                };
+                                if let Err(message) = result {
+                                    status_message = Some(message);
+                                }
+                            }
                             KeyCode::Char('q') => {
                                 popup_open = true;
                                 cursor_mode = CursorMode::Popup;
@@ -1644,6 +1698,66 @@ fn selected_area(
     }
 }
 
+/// What `y`/`x` took, ready for `p`.
+struct Copied {
+    sheet: u32,
+    range: (i32, i32, i32, i32),
+    data: ClipboardData,
+    /// Tab separated values, for the system clipboard
+    text: String,
+    cut: bool,
+}
+
+/// Copies (or marks for cutting) `area`. The engine copies its own selection,
+/// so that is set first. A cut only removes the source when it is pasted.
+fn copy_area(
+    model: &mut UserModel,
+    anchor: (i32, i32),
+    area: &Area,
+    cut: bool,
+) -> Result<Copied, String> {
+    model.set_selected_sheet(area.sheet)?;
+    model.set_selected_cell(anchor.0, anchor.1)?;
+    model.set_selected_range(
+        area.row,
+        area.column,
+        area.row + area.height - 1,
+        area.column + area.width - 1,
+    )?;
+    // The engine's `Clipboard` has private fields: read them through serde
+    let mut json = serde_json::to_value(model.copy_to_clipboard()?).map_err(|e| e.to_string())?;
+    let mut field = |name: &str| json[name].take();
+    let err = |e: serde_json::Error| e.to_string();
+    Ok(Copied {
+        sheet: serde_json::from_value(field("sheet")).map_err(err)?,
+        range: serde_json::from_value(field("range")).map_err(err)?,
+        data: serde_json::from_value(field("data")).map_err(err)?,
+        text: field("csv").as_str().unwrap_or_default().to_string(),
+        cut,
+    })
+}
+
+/// Pastes at `anchor`, adjusting references like Excel does.
+fn paste(
+    model: &mut UserModel,
+    sheet: u32,
+    anchor: (i32, i32),
+    copied: &Copied,
+) -> Result<(), String> {
+    model.set_selected_sheet(sheet)?;
+    model.set_selected_cell(anchor.0, anchor.1)?;
+    model.paste_from_clipboard(copied.sheet, copied.range, &copied.data, copied.cut)
+}
+
+/// Sends `text` to the system clipboard with the OSC 52 escape sequence
+/// (iTerm2, kitty, WezTerm, Alacritty, tmux...; ignored by terminals without it).
+fn to_system_clipboard(text: &str) {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b]52;c;{}\x07", STANDARD.encode(text));
+    let _ = out.flush();
+}
+
 /// Toggles a boolean font style (`font.b`, `font.i`, `font.u` or
 /// `font.strike`) over `range`. As in Excel the selected (anchor) cell decides
 /// the direction: if it already has the style, the whole range loses it,
@@ -1668,6 +1782,23 @@ fn toggle_font_style(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_paste_and_cut() {
+        let mut model = UserModel::new_empty("m", "en", "UTC", "en").unwrap();
+        model.set_user_input(0, 1, 1, "2").unwrap();
+        model.set_user_input(0, 1, 2, "=A1*10").unwrap();
+        let area = selection_area(0, (1, 1), (1, 2), false, false);
+        let copied = copy_area(&mut model, (1, 1), &area, false).unwrap();
+        assert_eq!(copied.text, "2\t20");
+        paste(&mut model, 0, (3, 1), &copied).unwrap();
+        // The relative reference moved with the paste
+        assert_eq!(model.get_cell_content(0, 3, 2).unwrap(), "=A3*10");
+        let cut = copy_area(&mut model, (1, 1), &area, true).unwrap();
+        paste(&mut model, 0, (5, 1), &cut).unwrap();
+        assert_eq!(model.get_cell_content(0, 5, 1).unwrap(), "2");
+        assert_eq!(model.get_cell_content(0, 1, 1).unwrap(), "");
+    }
 
     #[test]
     fn selection_area_spans_both_ends() {

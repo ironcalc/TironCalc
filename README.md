@@ -52,6 +52,10 @@ Keys:
 -   `c` to pick a text color for the current cell
 -   `Ctrl+B`/`Ctrl+I`/`Ctrl+U`/`Ctrl+5` to toggle bold/italic/underline/strikethrough
     on the selected cells, as in Excel (`Ctrl+2`/`Ctrl+4` also work for bold/underline)
+-   `y`/`x`/`p` to copy/cut/paste, as in vim (`Ctrl+C`/`Ctrl+X`/`Ctrl+V` too).
+    Formulas keep their relative references and formatting comes along. A cut
+    removes the source when you paste. The text is also sent to the system
+    clipboard in terminals that support it (iTerm2, kitty, WezTerm, Alacritty)
 -   `Delete` (or `Backspace`) to clear the contents of the selected cells
 -   `<`/`>` (or `,`/`.`) to make the current column narrower/wider
 -   `-`/`=` to make the current row shorter/taller
