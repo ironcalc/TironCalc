@@ -7,9 +7,17 @@
 
 TironCalc, or Tiron for friends, is a TUI (Terminal User Interface) for IronCalc. Based on [ratatui](https://github.com/ratatui-org/ratatui)
 
-![TironCalc Screenshot](docs/screenshot.png)
+![TironCalc](docs/using-tironcalc01.png)
 
-## Build
+<video src="docs/using-tironcalc.webm" controls muted loop width="100%"></video>
+
+## Install
+
+```
+cargo install tironcalc
+```
+
+## Build from source
 
 ```
 cargo build --release
@@ -30,6 +38,9 @@ Load an existing Excel file:
 ```
 $ tiron example.xlsx
 ```
+
+Keys:
+
 -   `Arrow Keys` to navigate cells (`Shift` + arrows extends the selection)
 -   `e` to edit a cell and enter the value or formula.
 -   `u`/`r` to undo/redo
@@ -49,7 +60,11 @@ $ tiron example.xlsx
 -   `f` to freeze the rows above and the columns to the left of the current
     cell; press it again on the same cell (or on A1) to unfreeze
 -   `?` to show the keyboard shortcuts
--   `PgUp/PgDown` to navigate rows faster
+-   `PgUp/PgDown` to jump 10 rows
+
+| Colors | Keyboard help | Saving |
+| --- | --- | --- |
+| ![Background color picker](docs/using-tironcalc02.png) | ![Keyboard shortcuts](docs/using-tironcalc03.png) | ![Save prompt](docs/using-tironcalc04.png) |
 
 
 ## Inspiration
@@ -60,6 +75,7 @@ Andrés Martinelli has been maintaining [sc-im](https://github.com/andmarti1424/
 
 ## See also
 
-A really nice similar project
+Other terminal spreadsheets built on the IronCalc engine:
 
-[SheetsUI](https://github.com/zaphar/sheetsui)
+-   [SheetsUI](https://github.com/zaphar/sheetsui)
+-   [l123](https://github.com/duane1024/l123)
