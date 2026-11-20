@@ -9,7 +9,7 @@ TironCalc, or Tiron for friends, is a TUI (Terminal User Interface) for IronCalc
 
 ![TironCalc](docs/using-tironcalc01.png)
 
-<video src="docs/using-tironcalc.webm" controls muted loop width="100%"></video>
+![TironCalc demo](docs/using-tironcalc.gif)
 
 ## Install
 
